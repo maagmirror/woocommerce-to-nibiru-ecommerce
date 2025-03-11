@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: WooCommerce Exporter
- * Description: Exporta productos y categorías de WooCommerce a otro eCommerce en batches.
+ * Plugin Name: WooCommerce Exporter to Nibiru Ecommerce
+ * Description: Exporta productos y categorías de WooCommerce a Nibiru eCommerce en batches.
  * Version: 1.2
- * Author: Tu Nombre
+ * Author: Nibiru Team
  */
 
 // Bloquear acceso directo
