@@ -35,9 +35,14 @@ function wc_exporter_admin_page() {
   ?>
   <div class="wrap" style="max-width: 600px;">
     <h1 style="text-align: center;">WooCommerce Exporter</h1>
-    <p><strong>Total de productos en WooCommerce:</strong> <span id="total_products"><?php echo $total_products; ?></span>
+    <p>
+      <strong>Total de productos en WooCommerce:</strong>
+      <span id="total_products"><?php echo $total_products; ?></span>
     </p>
-    <p><strong>Productos exportados:</strong> <span id="exported_products">0</span></p>
+    <p>
+      <strong>Productos exportados:</strong>
+      <span id="exported_products">0</span>
+    </p>
 
     <form id="wc_exporter_form"
       style="display: flex; flex-direction: column; gap: 10px; background: #fff; padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
@@ -50,9 +55,13 @@ function wc_exporter_admin_page() {
       <label for="show_log">Mostrar datos enviados:</label>
       <input type="checkbox" id="show_log" name="show_log">
 
+      <label for="force_stock">Forzar stock mínimo (si stock=0, asignar 1):</label>
+      <input type="checkbox" id="force_stock" name="force_stock">
+
       <button type="button" id="start_export"
-        style="background: #0073aa; color: white; padding: 10px; border: none; cursor: pointer;">Exportar
-        Productos</button>
+        style="background: #0073aa; color: white; padding: 10px; border: none; cursor: pointer;">
+        Exportar Productos
+      </button>
     </form>
     <div id="export_status" style="margin-top: 20px; padding: 10px; background: #f7f7f7; border: 1px solid #ddd;"></div>
   </div>
@@ -61,6 +70,7 @@ function wc_exporter_admin_page() {
       let apiKey = document.getElementById('api_key').value;
       let apiUrl = document.getElementById('api_url').value;
       let showLog = document.getElementById('show_log').checked;
+      let forceStock = document.getElementById('force_stock').checked;
       let statusBox = document.getElementById('export_status');
       let exportedCount = 0;
 
@@ -73,6 +83,7 @@ function wc_exporter_admin_page() {
             api_key: apiKey,
             api_url: apiUrl,
             show_log: showLog ? '1' : '0',
+            force_stock: forceStock ? '1' : '0',
             offset: offset
           })
         })
@@ -101,17 +112,21 @@ function wc_exporter_admin_page() {
 // Agregar la acción AJAX para exportar productos
 add_action('wp_ajax_wc_export_products', 'wc_export_products');
 
-// Exportar productos en batches, incluyendo variantes si existen
+// Exportar productos en batches, incluyendo variantes y exportación automática de categorías
 function wc_export_products() {
   if (!isset($_POST['api_key']) || !isset($_POST['api_url'])) {
     wp_send_json(['message' => 'Error: Falta API Key o API URL.']);
     return;
   }
 
-  // Obtener el offset enviado desde el front, o 0 por defecto
+  // Obtener parámetros enviados desde el front
   $offset = isset($_POST['offset']) ? (int) $_POST['offset'] : 0;
   $api_key = sanitize_text_field($_POST['api_key']);
   $api_url = rtrim(sanitize_text_field($_POST['api_url']), '/');
+  $force_stock = (isset($_POST['force_stock']) && $_POST['force_stock'] === '1');
+
+  // Cargar el mapping de categorías ya exportadas (guardado en la BD)
+  $category_mapping = get_option('wc_exporter_category_mapping', array());
 
   // Consultar 10 productos a partir del offset
   $products = wc_get_products([
@@ -138,48 +153,102 @@ function wc_export_products() {
     }
 
     // Datos básicos del producto
+    $product_stock = (int) $product->get_stock_quantity();
+    // Si force_stock está activado y el stock es 0, asignar 1
+    if ($force_stock && $product_stock <= 0) {
+      $product_stock = 1;
+    }
+
     $data = [
       'apikey' => $api_key,
       'sku' => $product->get_sku() ?: $product->get_id(),
       'title' => $product->get_name(),
       'price' => (float) $product->get_price(),
       'currency' => get_woocommerce_currency(),
-      'stock' => (int) $product->get_stock_quantity(),
+      'stock' => $product_stock,
       'product_type' => 'physical',
       'visibility' => 1,
       'status' => 1,
       'image_urls' => $images,
-      // Si tienes category_id, lo puedes agregar aquí.
+      // Se asignará 'category_id' más adelante
     ];
+
+    // Exportar categoría automáticamente:
+    // Se toma la primera categoría asignada al producto (si existe)
+    $cat_ids = $product->get_category_ids();
+    if (!empty($cat_ids)) {
+      $wc_cat_id = $cat_ids[0]; // se usa la primera categoría asignada
+      if (isset($category_mapping[$wc_cat_id])) {
+        $remote_cat_id = $category_mapping[$wc_cat_id];
+      } else {
+        $term = get_term($wc_cat_id, 'product_cat');
+        $cat_data = [
+          'apikey' => $api_key,
+          'parent_id' => $term->parent ? (int) $term->parent : 0,
+          'name' => $term->name,
+          'description' => $term->description,
+        ];
+
+        $cat_response = wp_remote_post("{$api_url}/api/upload-category", [
+          'timeout' => 15,
+          'body' => json_encode($cat_data),
+          'headers' => ['Content-Type' => 'application/json']
+        ]);
+
+        if (is_wp_error($cat_response)) {
+          $log[] = "Error en categoría {$term->name}: " . $cat_response->get_error_message();
+          $remote_cat_id = 0;
+        } else {
+          $cat_body = json_decode(wp_remote_retrieve_body($cat_response), true);
+          if (isset($cat_body['success']) && $cat_body['success']) {
+            $remote_cat_id = $cat_body['category_id'];
+            $log[] = "Categoría {$term->name} exportada, remote ID: {$remote_cat_id}.";
+          } else {
+            if (isset($cat_body['category_id'])) {
+              $remote_cat_id = $cat_body['category_id'];
+              $log[] = "Categoría {$term->name} ya existe, remote ID: {$remote_cat_id}.";
+            } else {
+              $log[] = "Error en categoría {$term->name}: " . ($cat_body['message'] ?? 'Respuesta inesperada.');
+              $remote_cat_id = 0;
+            }
+          }
+          $category_mapping[$wc_cat_id] = $remote_cat_id;
+          update_option('wc_exporter_category_mapping', $category_mapping);
+        }
+      }
+      $data['category_id'] = $remote_cat_id;
+    } else {
+      $data['category_id'] = 0;
+    }
 
     // Si el producto es variable, incluir variantes
     if ($product->is_type('variable')) {
-      $variation_attributes = $product->get_variation_attributes(); // Array: 'pa_color' => [ 'Rojo', 'Azul' ], etc.
+      $variation_attributes = $product->get_variation_attributes();
       $available_variations = $product->get_available_variations();
       $variants = [];
 
-      // Recorrer cada atributo de variación
       foreach ($variation_attributes as $attr_slug => $options) {
         $label = wc_attribute_label($attr_slug);
-        // Si el slug contiene "color", asumimos que es una variante de color
         $type = (strpos(strtolower($attr_slug), 'color') !== false) ? "color" : "dropdown";
         $options_array = [];
 
-        // Para cada opción del atributo, buscamos la primera variación que la tenga
         foreach ($options as $option_value) {
           foreach ($available_variations as $variation) {
             $key = "attribute_" . $attr_slug;
             if (isset($variation['attributes'][$key]) && $variation['attributes'][$key] === $option_value) {
               $variation_id = $variation['variation_id'];
-              // Obtener stock de la variación
-              $stock = get_post_meta($variation_id, '_stock', true);
+              $stock = (int) get_post_meta($variation_id, '_stock', true);
+              // Si force_stock está activado y el stock es 0, asignar 1
+              if ($force_stock && $stock <= 0) {
+                $stock = 1;
+              }
               $options_array[] = [
                 "name" => $option_value,
                 "price" => $variation['display_price'],
-                "stock" => (int) $stock,
+                "stock" => $stock,
                 "color" => (strpos(strtolower($attr_slug), 'color') !== false) ? $option_value : ""
               ];
-              break; // Se toma la primera variación encontrada para esta opción
+              break;
             }
           }
         }
@@ -192,13 +261,12 @@ function wc_export_products() {
           "options" => $options_array
         ];
       }
-      // Agregar el array de variantes a los datos del producto
       $data["variants"] = $variants;
     }
 
-    // Enviar los datos a la API externa
+    // Enviar el producto al endpoint remoto
     $response = wp_remote_post("{$api_url}/api/upload-product", [
-      'timeout' => 15, // Aumenta el timeout si es necesario
+      'timeout' => 15,
       'body' => json_encode($data),
       'headers' => ['Content-Type' => 'application/json']
     ]);
@@ -215,7 +283,6 @@ function wc_export_products() {
     }
   }
 
-  // Calcular el siguiente offset
   $next_offset = count($products) == 10 ? $offset + 10 : null;
 
   wp_send_json([
