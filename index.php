@@ -101,7 +101,7 @@ function wc_exporter_admin_page() {
 // Agregar la acción AJAX para exportar productos
 add_action('wp_ajax_wc_export_products', 'wc_export_products');
 
-// Exportar productos en batches
+// Exportar productos en batches, incluyendo variantes si existen
 function wc_export_products() {
   if (!isset($_POST['api_key']) || !isset($_POST['api_url'])) {
     wp_send_json(['message' => 'Error: Falta API Key o API URL.']);
@@ -122,6 +122,7 @@ function wc_export_products() {
   $log = [];
 
   foreach ($products as $product) {
+    // Procesar imágenes
     $images = [];
     if ($product->get_image_id()) {
       $images[] = wp_get_attachment_url($product->get_image_id());
@@ -136,6 +137,7 @@ function wc_export_products() {
       $images = ["https://via.placeholder.com/500"];
     }
 
+    // Datos básicos del producto
     $data = [
       'apikey' => $api_key,
       'sku' => $product->get_sku() ?: $product->get_id(),
@@ -146,10 +148,57 @@ function wc_export_products() {
       'product_type' => 'physical',
       'visibility' => 1,
       'status' => 1,
-      'image_urls' => $images
+      'image_urls' => $images,
+      // Si tienes category_id, lo puedes agregar aquí.
     ];
 
+    // Si el producto es variable, incluir variantes
+    if ($product->is_type('variable')) {
+      $variation_attributes = $product->get_variation_attributes(); // Array: 'pa_color' => [ 'Rojo', 'Azul' ], etc.
+      $available_variations = $product->get_available_variations();
+      $variants = [];
+
+      // Recorrer cada atributo de variación
+      foreach ($variation_attributes as $attr_slug => $options) {
+        $label = wc_attribute_label($attr_slug);
+        // Si el slug contiene "color", asumimos que es una variante de color
+        $type = (strpos(strtolower($attr_slug), 'color') !== false) ? "color" : "dropdown";
+        $options_array = [];
+
+        // Para cada opción del atributo, buscamos la primera variación que la tenga
+        foreach ($options as $option_value) {
+          foreach ($available_variations as $variation) {
+            $key = "attribute_" . $attr_slug;
+            if (isset($variation['attributes'][$key]) && $variation['attributes'][$key] === $option_value) {
+              $variation_id = $variation['variation_id'];
+              // Obtener stock de la variación
+              $stock = get_post_meta($variation_id, '_stock', true);
+              $options_array[] = [
+                "name" => $option_value,
+                "price" => $variation['display_price'],
+                "stock" => (int) $stock,
+                "color" => (strpos(strtolower($attr_slug), 'color') !== false) ? $option_value : ""
+              ];
+              break; // Se toma la primera variación encontrada para esta opción
+            }
+          }
+        }
+
+        $variants[] = [
+          "label" => $label,
+          "type" => $type,
+          "is_visible" => 1,
+          "use_different_price" => 1,
+          "options" => $options_array
+        ];
+      }
+      // Agregar el array de variantes a los datos del producto
+      $data["variants"] = $variants;
+    }
+
+    // Enviar los datos a la API externa
     $response = wp_remote_post("{$api_url}/api/upload-product", [
+      'timeout' => 15, // Aumenta el timeout si es necesario
       'body' => json_encode($data),
       'headers' => ['Content-Type' => 'application/json']
     ]);
@@ -166,7 +215,7 @@ function wc_export_products() {
     }
   }
 
-  // Calcular el siguiente offset: si se obtuvieron 10 productos, hay más productos para exportar
+  // Calcular el siguiente offset
   $next_offset = count($products) == 10 ? $offset + 10 : null;
 
   wp_send_json([
