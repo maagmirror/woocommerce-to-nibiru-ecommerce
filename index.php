@@ -181,7 +181,7 @@ function wc_export_products() {
       'short_description' => wp_strip_all_tags($product->get_short_description()),
       'seo_title' => $product->get_name(),
       'seo_description' => wp_strip_all_tags($product->get_short_description()),
-      'seo_keywords' => implode(', ', wc_get_product_tag_list($product->get_id(), ', ', '', '')),
+      'seo_keywords' => implode(', ', wp_get_post_terms($product->get_id(), 'product_tag', ['fields' => 'names'])),
     ];
 
     // Procesamiento de categorías
