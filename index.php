@@ -177,6 +177,11 @@ function wc_export_products() {
       'visibility' => 1,
       'status' => 1,
       'image_urls' => $images,
+      'description' => wp_strip_all_tags($product->get_description()),
+      'short_description' => wp_strip_all_tags($product->get_short_description()),
+      'seo_title' => $product->get_name(),
+      'seo_description' => wp_strip_all_tags($product->get_short_description()),
+      'seo_keywords' => implode(', ', wc_get_product_tag_list($product->get_id(), ', ', '', '')),
     ];
 
     // Procesamiento de categorías
@@ -263,11 +268,15 @@ function wc_export_products() {
       $variation_attributes = $product->get_variation_attributes();
       $available_variations = $product->get_available_variations();
       $variants = [];
+      $attribute_keys_order = array_keys($variation_attributes); // Para mantener orden
+
       foreach ($variation_attributes as $attr_slug => $options) {
         $label = wc_attribute_label($attr_slug);
         $type = (strpos(strtolower($attr_slug), 'color') !== false) ? "color" : "dropdown";
+
         $options_array = [];
         foreach ($options as $option_value) {
+          $matched = false;
           foreach ($available_variations as $variation) {
             $key = "attribute_" . $attr_slug;
             if (isset($variation['attributes'][$key]) && $variation['attributes'][$key] === $option_value) {
@@ -282,10 +291,19 @@ function wc_export_products() {
                 "stock" => $stock,
                 "color" => (strpos(strtolower($attr_slug), 'color') !== false) ? $option_value : ""
               ];
+              $matched = true;
               break;
             }
           }
+          if (!$matched) {
+            $options_array[] = [
+              "name" => $option_value,
+              "price" => $product->get_price(), // fallback
+              "stock" => 0
+            ];
+          }
         }
+
         $variants[] = [
           "label" => $label,
           "type" => $type,
@@ -295,6 +313,47 @@ function wc_export_products() {
         ];
       }
       $data["variants"] = $variants;
+
+      // 🔄 Combinaciones de variantes (Color + Talle, etc.)
+      $combinations = [];
+      foreach ($available_variations as $variation) {
+        $variation_id = $variation['variation_id'];
+        $comb_options = [];
+
+        foreach ($variation['attributes'] as $attr_key => $attr_val) {
+          $comb_options[] = $attr_val;
+        }
+
+        $comb_stock = (int) get_post_meta($variation_id, '_stock', true);
+        if ($force_stock && $comb_stock <= 0) {
+          $comb_stock = 1;
+        }
+
+        $comb_price = $variation['display_price'];
+        $comb_sku = get_post_meta($variation_id, '_sku', true) ?: "VAR-{$variation_id}";
+
+        // Intentar buscar imagen de la variación
+        $image_id = $variation['image_id'] ?? null;
+        $comb_images = [];
+        if ($image_id) {
+          $img_url = wp_get_attachment_url($image_id);
+          if ($img_url) {
+            $comb_images[] = $img_url;
+          }
+        }
+
+        $combinations[] = [
+          "options" => $comb_options,
+          "sku" => $comb_sku,
+          "price" => $comb_price,
+          "stock" => $comb_stock,
+          "is_visible" => 1,
+          "images" => $comb_images
+        ];
+      }
+
+      $data["combinations"] = $combinations;
+
     }
 
     // Enviar el producto al endpoint remoto
