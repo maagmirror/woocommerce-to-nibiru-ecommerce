@@ -329,35 +329,43 @@ class WC_Exporter {
             return 0;
         }
         
-        $wc_cat_id = $cat_ids[0];
+        return $this->ensure_wc_category_on_remote((int) $cat_ids[0], $log);
+    }
+    
+    /**
+     * Garantiza que una categoría WooCommerce exista en remoto (mapeo, GET por slug o POST /api/upload-category).
+     * POST espera parent_id como ID remoto del padre, no el term_id de WordPress.
+     */
+    private function ensure_wc_category_on_remote($wc_cat_id, &$log) {
+        $wc_cat_id = (int) $wc_cat_id;
+        if ($wc_cat_id <= 0) {
+            return 0;
+        }
         
-        // Verificar si ya existe el mapping
         if (isset($this->category_mapping[$wc_cat_id])) {
-            $remote_cat_id = $this->category_mapping[$wc_cat_id];
+            $remote_cat_id = (int) $this->category_mapping[$wc_cat_id];
             $log[] = "Mapping existente: WooCatID {$wc_cat_id} => RemoteCatID {$remote_cat_id}";
             return $remote_cat_id;
         }
         
-        // Buscar o crear categoría
         $term = get_term($wc_cat_id, 'product_cat');
-        if (!$term) {
+        if (!$term || is_wp_error($term)) {
             $log[] = "No se encontró el término para WooCatID {$wc_cat_id}";
             return 0;
         }
         
         $log[] = "Procesando categoría: WooCatID {$wc_cat_id} - Name: {$term->name} - Slug: {$term->slug}";
         
-        // Buscar en categorías remotas
         $remote_cat_id = $this->find_remote_category($term->slug, $log);
         
-        // Si no se encontró, crear
         if (!$remote_cat_id) {
             $remote_cat_id = $this->create_remote_category($term, $log);
         }
         
-        // Guardar mapping
-        $this->category_mapping[$wc_cat_id] = $remote_cat_id;
-        update_option('wc_exporter_category_mapping', $this->category_mapping);
+        if ($remote_cat_id) {
+            $this->category_mapping[$wc_cat_id] = $remote_cat_id;
+            update_option('wc_exporter_category_mapping', $this->category_mapping);
+        }
         
         return $remote_cat_id;
     }
@@ -389,10 +397,21 @@ class WC_Exporter {
      * Crea una categoría en el ecommerce remoto
      */
     private function create_remote_category($term, &$log) {
+        $remote_parent_id = 0;
+        if (!empty($term->parent)) {
+            $remote_parent_id = $this->ensure_wc_category_on_remote((int) $term->parent, $log);
+            if (!$remote_parent_id) {
+                $log[] = "Padre WooCatID {$term->parent} no pudo resolverse al remoto; usando parent_id 0 (comportamiento API).";
+                $remote_parent_id = 0;
+            }
+        }
+        
+        // POST /api/upload-category: name (slug autogenerado), parent_id remoto, opcionales description, visibility, show_on_main_menu
         $cat_data = array(
-            'parent_id' => $term->parent ? (int) $term->parent : 0,
             'name' => $term->name,
-            'description' => $term->description,
+            'parent_id' => $remote_parent_id,
+            'description' => $term->description ? $term->description : '',
+            'visibility' => 1,
         );
         
         $log[] = "Intentando crear categoría con datos: " . json_encode($cat_data);

@@ -35,8 +35,9 @@ class WC_Exporter_API {
     }
     
     /**
-     * Crea una categoría en el ecommerce remoto
-     * 
+     * Crea una categoría en el ecommerce remoto (POST /api/upload-category).
+     * Campos típicos: name, parent_id (ID remoto), description, visibility, show_on_main_menu; apikey se añade aquí.
+     *
      * @param array $category_data Datos de la categoría
      * @return array|WP_Error Respuesta de la API o error
      */
