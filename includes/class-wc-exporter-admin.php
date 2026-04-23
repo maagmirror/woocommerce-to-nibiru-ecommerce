@@ -34,6 +34,8 @@ class WC_Exporter_Admin {
         $total_products = $this->get_total_products();
         $export_nonce = wp_create_nonce('wc_exporter_export');
         $ajax_url = admin_url('admin-ajax.php');
+        $rest_url = esc_url_raw(rest_url('wc-exporter/v1/export-batch'));
+        $rest_nonce = wp_create_nonce('wp_rest');
         ?>
         <style>
             .wc-exp-wrap { max-width: 920px; }
@@ -126,6 +128,33 @@ class WC_Exporter_Admin {
                 word-break: break-word;
                 font-size: 11px;
             }
+            .wc-exp-resume-hint {
+                font-size: 13px;
+                color: #50575e;
+                margin: 0 0 8px 0;
+                padding: 8px 10px;
+                background: #f0f6fc;
+                border-left: 4px solid #72aee6;
+                border-radius: 4px;
+            }
+            .wc-exp-toolbar {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+                align-items: center;
+                margin-top: 8px;
+            }
+            .wc-exp-toolbar button.secondary {
+                background: #f6f7f7;
+                border: 1px solid #c3c4c7;
+                color: #2c3338;
+                padding: 6px 12px;
+                border-radius: 3px;
+                cursor: pointer;
+            }
+            .wc-exp-toolbar button.secondary:hover {
+                background: #f0f0f1;
+            }
         </style>
         <div class="wrap wc-exp-wrap">
             <h1 style="text-align:center;">WooCommerce Exporter</h1>
@@ -154,10 +183,19 @@ class WC_Exporter_Admin {
                 <label for="force_categories">Forzar reexportar categorías:</label>
                 <input type="checkbox" id="force_categories" name="force_categories" checked>
                 
+                <label for="reset_progress" style="margin-top:6px;">Empezar desde el primer producto (ignora progreso guardado en este navegador):</label>
+                <input type="checkbox" id="reset_progress" name="reset_progress">
+                
+                <p id="wc_resume_hint" class="wc-exp-resume-hint" style="display:none;"></p>
+                
                 <button type="button" id="start_export"
                     style="background:#0073aa; color:white; padding:10px; border:none; cursor:pointer; border-radius:3px;">
                     Exportar Productos
                 </button>
+                <div class="wc-exp-toolbar">
+                    <button type="button" class="secondary" id="wc_clear_saved">Borrar datos guardados en el navegador</button>
+                    <span class="description" style="margin:0;">Se guardan API URL, clave y el último offset para poder reanudar si recargas la página (solo en este equipo/navegador).</span>
+                </div>
             </form>
             <div id="export_status" class="wc-exp-status"></div>
         </div>
@@ -165,6 +203,172 @@ class WC_Exporter_Admin {
             (function () {
                 var ajaxUrl = <?php echo wp_json_encode($ajax_url); ?>;
                 var exportNonce = <?php echo wp_json_encode($export_nonce); ?>;
+                var restUrl = <?php echo wp_json_encode($rest_url); ?>;
+                var restNonce = <?php echo wp_json_encode($rest_nonce); ?>;
+                var STOR_KEY = 'wc_exporter_v1';
+
+                function readStore() {
+                    try {
+                        var raw = localStorage.getItem(STOR_KEY);
+                        return raw ? JSON.parse(raw) : {};
+                    } catch (e) {
+                        return {};
+                    }
+                }
+
+                function writeStore(obj) {
+                    try {
+                        localStorage.setItem(STOR_KEY, JSON.stringify(obj));
+                    } catch (e) {}
+                }
+
+                function mergeStore(partial) {
+                    var s = readStore();
+                    var k;
+                    for (k in partial) {
+                        if (Object.prototype.hasOwnProperty.call(partial, k)) {
+                            s[k] = partial[k];
+                        }
+                    }
+                    writeStore(s);
+                    return s;
+                }
+
+                function saveFormToStore() {
+                    mergeStore({
+                        api_key: document.getElementById('api_key').value,
+                        api_url: document.getElementById('api_url').value,
+                        show_log: document.getElementById('show_log').checked,
+                        force_stock: document.getElementById('force_stock').checked,
+                        force_categories: document.getElementById('force_categories').checked
+                    });
+                }
+
+                var saveTimer;
+                function scheduleSaveForm() {
+                    clearTimeout(saveTimer);
+                    saveTimer = setTimeout(saveFormToStore, 400);
+                }
+
+                function updateResumeHint() {
+                    var el = document.getElementById('wc_resume_hint');
+                    var s = readStore();
+                    var off = s.resume_offset;
+                    if (off != null && off !== '' && !isNaN(Number(off)) && Number(off) > 0 && !document.getElementById('reset_progress').checked) {
+                        el.style.display = 'block';
+                        el.textContent = 'Progreso guardado: continuará desde el offset ' + String(off) + '. Marca «Empezar desde el primer producto» si quieres reiniciar.';
+                    } else if (off != null && Number(off) > 0) {
+                        el.style.display = 'block';
+                        el.textContent = 'Hay un offset guardado (' + String(off) + '), pero reiniciar está marcado: se empezará desde 0.';
+                    } else {
+                        el.style.display = 'none';
+                    }
+                }
+
+                function restoreFormFromStore() {
+                    var s = readStore();
+                    if (s.api_key) {
+                        document.getElementById('api_key').value = s.api_key;
+                    }
+                    if (s.api_url) {
+                        document.getElementById('api_url').value = s.api_url;
+                    }
+                    if (typeof s.show_log === 'boolean') {
+                        document.getElementById('show_log').checked = s.show_log;
+                    }
+                    if (typeof s.force_stock === 'boolean') {
+                        document.getElementById('force_stock').checked = s.force_stock;
+                    }
+                    if (typeof s.force_categories === 'boolean') {
+                        document.getElementById('force_categories').checked = s.force_categories;
+                    }
+                    if (typeof s.last_session_exported === 'number' && s.last_session_exported >= 0) {
+                        document.getElementById('exported_products').textContent = String(s.last_session_exported);
+                    }
+                    updateResumeHint();
+                }
+
+                ['api_key', 'api_url', 'show_log', 'force_stock', 'force_categories'].forEach(function (id) {
+                    var el = document.getElementById(id);
+                    el.addEventListener('change', function () {
+                        scheduleSaveForm();
+                        updateResumeHint();
+                    });
+                    if (el.type === 'text') {
+                        el.addEventListener('input', scheduleSaveForm);
+                    }
+                });
+                document.getElementById('reset_progress').addEventListener('change', updateResumeHint);
+
+                document.getElementById('wc_clear_saved').addEventListener('click', function () {
+                    if (window.confirm('¿Borrar API URL, clave, opciones y progreso guardados en este navegador?')) {
+                        try {
+                            localStorage.removeItem(STOR_KEY);
+                        } catch (e) {}
+                        document.getElementById('reset_progress').checked = false;
+                        updateResumeHint();
+                    }
+                });
+
+                restoreFormFromStore();
+
+                function buildPayload(offset, apiKey, apiUrl, showLog, forceStock, forceCategories) {
+                    return {
+                        offset: offset,
+                        api_key: apiKey,
+                        api_url: apiUrl,
+                        show_log: showLog,
+                        force_stock: forceStock,
+                        force_categories: forceCategories
+                    };
+                }
+
+                function fetchViaRest(payload) {
+                    return fetch(restUrl, {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-WP-Nonce': restNonce
+                        },
+                        body: JSON.stringify(payload)
+                    });
+                }
+
+                function fetchViaAjax(payload) {
+                    return fetch(ajaxUrl, {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: new URLSearchParams({
+                            action: 'wc_export_products',
+                            nonce: exportNonce,
+                            api_key: payload.api_key,
+                            api_url: payload.api_url,
+                            show_log: payload.show_log ? '1' : '0',
+                            force_stock: payload.force_stock ? '1' : '0',
+                            force_categories: payload.force_categories ? '1' : '0',
+                            offset: String(payload.offset)
+                        })
+                    });
+                }
+
+                /**
+                 * Intenta primero la API REST; si devuelve 404/405 (ruta no disponible), usa admin-ajax.
+                 */
+                function fetchExportBatch(payload) {
+                    return fetchViaRest(payload).then(function (response) {
+                        if (response.ok) {
+                            return response;
+                        }
+                        if (response.status === 404 || response.status === 405) {
+                            return fetchViaAjax(payload).then(function (r2) {
+                                return r2;
+                            });
+                        }
+                        return response;
+                    });
+                }
 
                 function renderProductCard(p) {
                     var mod = p.status === 'success' ? 'success' : (p.status === 'error' ? 'error' : 'info');
@@ -261,32 +465,53 @@ class WC_Exporter_Admin {
                     var showLog = document.getElementById('show_log').checked;
                     var forceStock = document.getElementById('force_stock').checked;
                     var forceCategories = document.getElementById('force_categories').checked;
+                    var resetProgress = document.getElementById('reset_progress').checked;
                     var statusBox = document.getElementById('export_status');
+
+                    var startOffset = 0;
+                    if (resetProgress) {
+                        mergeStore({ resume_offset: null });
+                        startOffset = 0;
+                    } else {
+                        var st = readStore();
+                        if (st.resume_offset != null && st.resume_offset !== '' && !isNaN(Number(st.resume_offset))) {
+                            startOffset = parseInt(st.resume_offset, 10);
+                        }
+                    }
+
+                    saveFormToStore();
+
                     var exportedCount = 0;
+                    if (!resetProgress && startOffset > 0) {
+                        var prevEx = readStore().last_session_exported;
+                        if (typeof prevEx === 'number' && prevEx >= 0) {
+                            exportedCount = prevEx;
+                        }
+                    }
+                    document.getElementById('exported_products').textContent = String(exportedCount);
 
                     function exportBatch(offset) {
-                        fetch(ajaxUrl, {
-                            method: 'POST',
-                            credentials: 'same-origin',
-                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                            body: new URLSearchParams({
-                                action: 'wc_export_products',
-                                nonce: exportNonce,
-                                api_key: apiKey,
-                                api_url: apiUrl,
-                                show_log: showLog ? '1' : '0',
-                                force_stock: forceStock ? '1' : '0',
-                                force_categories: forceCategories ? '1' : '0',
-                                offset: String(offset)
-                            })
-                        })
+                        var payload = buildPayload(offset, apiKey, apiUrl, showLog, forceStock, forceCategories);
+                        fetchExportBatch(payload)
                             .then(function (response) {
                                 if (!response.ok) {
                                     var hint = '';
                                     if (response.status === 404) {
-                                        hint = ' Comprueba que exista wp-admin/admin-ajax.php y que ningún plugin o regla del servidor bloquee AJAX.';
+                                        hint = ' Ni la ruta REST (/wp-json/…) ni admin-ajax respondieron. Revisa permalinks, .htaccess y reglas del servidor.';
                                     }
-                                    throw new Error('Error HTTP ' + response.status + ' ' + response.statusText + '.' + hint);
+                                    if (response.status === 403) {
+                                        hint = ' Recarga la página por si el nonce de seguridad caducó.';
+                                    }
+                                    return response.text().then(function (t) {
+                                        var msg = 'Error HTTP ' + response.status + ' ' + response.statusText + '.' + hint;
+                                        try {
+                                            var j = JSON.parse(t);
+                                            if (j && j.message) {
+                                                msg = j.message + ' (' + response.status + ')';
+                                            }
+                                        } catch (e2) {}
+                                        throw new Error(msg);
+                                    });
                                 }
                                 return response.text();
                             })
@@ -308,11 +533,18 @@ class WC_Exporter_Admin {
 
                                 appendBatch(statusBox, data);
                                 exportedCount += data.exported_count || 0;
-                                document.getElementById('exported_products').textContent = exportedCount;
+                                document.getElementById('exported_products').textContent = String(exportedCount);
+                                mergeStore({
+                                    last_session_exported: exportedCount,
+                                    resume_offset: data.next_offset != null ? data.next_offset : null
+                                });
+                                updateResumeHint();
 
                                 if (data.next_offset !== null && data.next_offset !== undefined) {
                                     exportBatch(data.next_offset);
                                 } else {
+                                    mergeStore({ resume_offset: null });
+                                    updateResumeHint();
                                     var done = document.createElement('p');
                                     done.style.cssText = 'color:#00a32a;font-weight:600;margin:12px 0 0 0;';
                                     done.textContent = 'Exportación completada. Total en esta sesión: ' + exportedCount + ' productos.';
@@ -332,9 +564,9 @@ class WC_Exporter_Admin {
                     statusBox.innerHTML = '';
                     var start = document.createElement('p');
                     start.style.margin = '0 0 12px 0';
-                    start.textContent = 'Iniciando exportación…';
+                    start.textContent = 'Iniciando exportación desde offset ' + String(startOffset) + ' (REST primero, luego admin-ajax si hace falta)…';
                     statusBox.appendChild(start);
-                    exportBatch(0);
+                    exportBatch(startOffset);
                 });
             })();
         </script>

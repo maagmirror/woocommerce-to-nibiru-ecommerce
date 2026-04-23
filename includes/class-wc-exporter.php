@@ -14,55 +14,137 @@ class WC_Exporter {
     
     public function __construct() {
         add_action('wp_ajax_wc_export_products', array($this, 'export_products'));
+        add_action('rest_api_init', array($this, 'register_rest_routes'));
     }
     
     /**
-     * Exporta productos en batches
+     * Ruta REST alternativa a admin-ajax (útil si admin-ajax.php está bloqueado).
+     */
+    public function register_rest_routes() {
+        register_rest_route(
+            'wc-exporter/v1',
+            '/export-batch',
+            array(
+                'methods'             => 'POST',
+                'callback'            => array($this, 'rest_export_batch'),
+                'permission_callback' => function () {
+                    return current_user_can('manage_options');
+                },
+            )
+        );
+    }
+    
+    /**
+     * @param WP_REST_Request $request
+     * @return WP_REST_Response
+     */
+    public function rest_export_batch($request) {
+        $nonce = $request->get_header('X-WP-Nonce');
+        if (!$nonce || !wp_verify_nonce($nonce, 'wp_rest')) {
+            return new WP_REST_Response(
+                array(
+                    'success' => false,
+                    'message' => 'Nonce REST inválido o caducado. Recarga la página.',
+                ),
+                403
+            );
+        }
+        
+        $body = $request->get_json_params();
+        if (!is_array($body) || empty($body)) {
+            $body = $request->get_body_params();
+        }
+        if (!is_array($body)) {
+            $body = array();
+        }
+        
+        $result = $this->run_export_batch(
+            array(
+                'offset'           => isset($body['offset']) ? (int) $body['offset'] : 0,
+                'api_key'          => isset($body['api_key']) ? sanitize_text_field((string) $body['api_key']) : '',
+                'api_url'          => isset($body['api_url']) ? sanitize_text_field((string) $body['api_url']) : '',
+                'force_stock'      => $this->coerce_bool($body['force_stock'] ?? false),
+                'force_categories' => $this->coerce_bool($body['force_categories'] ?? false),
+                'show_log'         => $this->coerce_bool($body['show_log'] ?? false),
+            )
+        );
+        
+        return new WP_REST_Response($result, 200);
+    }
+    
+    /**
+     * @param mixed $value Valor desde JSON o POST.
+     */
+    private function coerce_bool($value) {
+        if ($value === true || $value === 1 || $value === '1' || $value === 'true') {
+            return true;
+        }
+        return false;
+    }
+    
+    /**
+     * Exporta productos en batches (admin-ajax).
      */
     public function export_products() {
-        // Iniciar buffer de salida para capturar errores
         ob_start();
         
-        // Verificar permisos
         if (!current_user_can('manage_options')) {
+            ob_end_clean();
             wp_send_json(array('success' => false, 'message' => 'No tienes permisos para realizar esta acción.'));
             return;
         }
         
         if (!isset($_POST['nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['nonce'])), 'wc_exporter_export')) {
+            ob_end_clean();
             wp_send_json(array('success' => false, 'message' => 'Sesión de seguridad caducada. Recarga esta página e inténtalo de nuevo.'));
             return;
         }
         
-        // Verificar que WooCommerce esté disponible
+        $result = $this->run_export_batch(
+            array(
+                'offset'           => isset($_POST['offset']) ? (int) $_POST['offset'] : 0,
+                'api_key'          => isset($_POST['api_key']) ? sanitize_text_field(wp_unslash($_POST['api_key'])) : '',
+                'api_url'          => isset($_POST['api_url']) ? sanitize_text_field(wp_unslash($_POST['api_url'])) : '',
+                'force_stock'      => !empty($_POST['force_stock']) && $_POST['force_stock'] === '1',
+                'force_categories' => !empty($_POST['force_categories']) && $_POST['force_categories'] === '1',
+                'show_log'         => !empty($_POST['show_log']) && $_POST['show_log'] === '1',
+            )
+        );
+        
+        ob_end_clean();
+        wp_send_json($result);
+    }
+    
+    /**
+     * Ejecuta un lote de exportación (compartido por AJAX y REST).
+     *
+     * @param array $args offset, api_key, api_url, force_stock, force_categories, show_log
+     * @return array Respuesta lista para JSON
+     */
+    private function run_export_batch(array $args) {
         if (!function_exists('wc_get_products')) {
-            wp_send_json(array('success' => false, 'message' => 'Error: WooCommerce no está disponible.'));
-            return;
+            return array('success' => false, 'message' => 'Error: WooCommerce no está disponible.');
         }
         
-        // Verificar que las clases necesarias estén cargadas
         if (!class_exists('WC_Exporter_API') || !class_exists('WC_Exporter_Currency')) {
-            wp_send_json(array('success' => false, 'message' => 'Error: Clases del plugin no están cargadas correctamente.'));
-            return;
+            return array('success' => false, 'message' => 'Error: Clases del plugin no están cargadas correctamente.');
         }
         
-        if (!isset($_POST['api_key']) || !isset($_POST['api_url'])) {
-            wp_send_json(array('success' => false, 'message' => 'Error: Falta API Key o API URL.'));
-            return;
+        $api_key = isset($args['api_key']) ? $args['api_key'] : '';
+        $api_url = isset($args['api_url']) ? $args['api_url'] : '';
+        if ($api_key === '' || $api_url === '') {
+            return array('success' => false, 'message' => 'Error: Falta API Key o API URL.');
         }
+        
+        $offset = isset($args['offset']) ? (int) $args['offset'] : 0;
+        $api_url = rtrim($api_url, '/');
+        $force_stock = !empty($args['force_stock']);
+        $force_categories = !empty($args['force_categories']);
+        $show_log = !empty($args['show_log']);
         
         try {
-            $offset = isset($_POST['offset']) ? (int) $_POST['offset'] : 0;
-            $api_key = sanitize_text_field($_POST['api_key']);
-            $api_url = rtrim(sanitize_text_field($_POST['api_url']), '/');
-            $force_stock = (isset($_POST['force_stock']) && $_POST['force_stock'] === '1');
-            $force_categories = (isset($_POST['force_categories']) && $_POST['force_categories'] === '1');
-            $show_log = (isset($_POST['show_log']) && $_POST['show_log'] === '1');
-            
-            // Inicializar API
             $this->api = new WC_Exporter_API($api_key, $api_url);
             
-            // Manejar mapping de categorías
             if ($force_categories) {
                 $this->category_mapping = array();
                 update_option('wc_exporter_category_mapping', $this->category_mapping);
@@ -70,40 +152,39 @@ class WC_Exporter {
                 $this->category_mapping = get_option('wc_exporter_category_mapping', array());
             }
             
-            // Obtener productos
-            $products = wc_get_products(array(
-                'limit' => 10,
-                'offset' => $offset,
-                'status' => 'publish'
-            ));
+            $products = wc_get_products(
+                array(
+                    'limit'  => 10,
+                    'offset' => $offset,
+                    'status' => 'publish',
+                )
+            );
             
             if (is_wp_error($products)) {
-                wp_send_json(array('success' => false, 'message' => 'Error al obtener productos: ' . $products->get_error_message()));
-                return;
+                return array('success' => false, 'message' => 'Error al obtener productos: ' . $products->get_error_message());
             }
             
             $log = array();
             
             if (empty($products)) {
-                wp_send_json(array(
-                    'message' => 'No hay más productos para exportar.',
-                    'exported_count' => 0,
-                    'next_offset' => null,
+                return array(
+                    'message'          => 'No hay más productos para exportar.',
+                    'exported_count'   => 0,
+                    'next_offset'      => null,
                     'product_previews' => array(),
-                ));
-                return;
+                );
             }
             
             $product_previews = array();
             
             foreach ($products as $product) {
                 $preview = array(
-                    'title' => $product->get_name(),
-                    'sku' => '',
-                    'thumb_url' => $product->get_image_id() ? (string) wp_get_attachment_image_url($product->get_image_id(), 'thumbnail') : '',
-                    'status' => 'info',
-                    'detail' => '',
-                    'request_json' => null,
+                    'title'         => $product->get_name(),
+                    'sku'           => '',
+                    'thumb_url'     => $product->get_image_id() ? (string) wp_get_attachment_image_url($product->get_image_id(), 'thumbnail') : '',
+                    'status'        => 'info',
+                    'detail'        => '',
+                    'request_json'  => null,
                     'response_json' => null,
                 );
                 
@@ -146,29 +227,23 @@ class WC_Exporter {
             
             $next_offset = count($products) == 10 ? $offset + 10 : null;
             
-            // Limpiar cualquier salida no deseada
-            ob_end_clean();
-            
-            wp_send_json(array(
-                'success' => true,
-                'message' => implode('<br>', $log),
-                'exported_count' => count($products),
-                'next_offset' => $next_offset,
+            return array(
+                'success'          => true,
+                'message'          => implode('<br>', $log),
+                'exported_count'   => count($products),
+                'next_offset'      => $next_offset,
                 'product_previews' => $product_previews,
-            ));
-            
+            );
         } catch (Exception $e) {
-            ob_end_clean();
-            wp_send_json(array(
+            return array(
                 'success' => false,
-                'message' => 'Error fatal: ' . $e->getMessage() . ' en línea ' . $e->getLine()
-            ));
+                'message' => 'Error fatal: ' . $e->getMessage() . ' en línea ' . $e->getLine(),
+            );
         } catch (Error $e) {
-            ob_end_clean();
-            wp_send_json(array(
+            return array(
                 'success' => false,
-                'message' => 'Error fatal PHP: ' . $e->getMessage() . ' en línea ' . $e->getLine() . ' del archivo ' . $e->getFile()
-            ));
+                'message' => 'Error fatal PHP: ' . $e->getMessage() . ' en línea ' . $e->getLine() . ' del archivo ' . $e->getFile(),
+            );
         }
     }
     
