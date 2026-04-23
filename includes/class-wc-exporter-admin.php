@@ -11,23 +11,19 @@ class WC_Exporter_Admin {
     
     public function __construct() {
         add_action('admin_menu', array($this, 'add_admin_menu'));
-        add_action('load-toplevel_page_wc_exporter', array($this, 'handle_inline_batch_request'));
+        add_action('admin_post_wc_exporter_run_batch', array($this, 'handle_admin_post_batch'));
     }
     
     /**
-     * Procesa un lote por POST directo a admin.php?page=wc_exporter (sin admin-ajax ni REST).
+     * Procesa un lote vía admin-post.php (evita POST a admin.php, bloqueado en algunos hosting/WAF).
      */
-    public function handle_inline_batch_request() {
-        if (empty($_POST['wc_exporter_inline']) || $_POST['wc_exporter_inline'] !== '1') {
-            return;
-        }
-        
+    public function handle_admin_post_batch() {
         if (!current_user_can('manage_options')) {
             wp_send_json(array('success' => false, 'message' => 'No tienes permisos para realizar esta acción.'));
             return;
         }
         
-        if (!isset($_POST['_wpnonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_wpnonce'])), 'wc_exporter_inline_batch')) {
+        if (!isset($_POST['_wpnonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_wpnonce'])), 'wc_exporter_run_batch')) {
             wp_send_json(array('success' => false, 'message' => 'Sesión de seguridad caducada. Recarga esta página e inténtalo de nuevo.'));
             return;
         }
@@ -74,8 +70,8 @@ class WC_Exporter_Admin {
         $total_products = $this->get_total_products();
         $export_nonce = wp_create_nonce('wc_exporter_export');
         $ajax_url = admin_url('admin-ajax.php');
-        $plugin_page_url = admin_url('admin.php?page=wc_exporter');
-        $inline_batch_nonce = wp_create_nonce('wc_exporter_inline_batch');
+        $admin_post_url = admin_url('admin-post.php');
+        $admin_post_nonce = wp_create_nonce('wc_exporter_run_batch');
         ?>
         <style>
             .wc-exp-wrap { max-width: 920px; }
@@ -243,8 +239,8 @@ class WC_Exporter_Admin {
             (function () {
                 var ajaxUrl = <?php echo wp_json_encode($ajax_url); ?>;
                 var exportNonce = <?php echo wp_json_encode($export_nonce); ?>;
-                var pluginPageUrl = <?php echo wp_json_encode($plugin_page_url); ?>;
-                var inlineBatchNonce = <?php echo wp_json_encode($inline_batch_nonce); ?>;
+                var adminPostUrl = <?php echo wp_json_encode($admin_post_url); ?>;
+                var adminPostNonce = <?php echo wp_json_encode($admin_post_nonce); ?>;
                 var STOR_KEY = 'wc_exporter_v1';
 
                 function readStore() {
@@ -364,17 +360,17 @@ class WC_Exporter_Admin {
                 }
 
                 /**
-                 * Mismo origen, misma sesión admin: evita /wp-json y admin-ajax (a menudo bloqueados o lentos).
+                 * admin-post.php: patrón WordPress para acciones admin (muchas reglas WAF bloquean POST a admin.php).
                  */
-                function fetchViaPluginPage(payload) {
-                    return fetch(pluginPageUrl, {
+                function fetchViaAdminPost(payload) {
+                    return fetch(adminPostUrl, {
                         method: 'POST',
                         credentials: 'same-origin',
                         cache: 'no-store',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: new URLSearchParams({
-                            wc_exporter_inline: '1',
-                            _wpnonce: inlineBatchNonce,
+                            action: 'wc_exporter_run_batch',
+                            _wpnonce: adminPostNonce,
                             api_key: payload.api_key,
                             api_url: payload.api_url,
                             show_log: payload.show_log ? '1' : '0',
@@ -405,11 +401,11 @@ class WC_Exporter_Admin {
                 }
 
                 /**
-                 * 1) POST a admin.php?page=wc_exporter (hook load-*)
-                 * 2) Si falla, admin-ajax (compatibilidad).
+                 * 1) admin-post.php (wc_exporter_run_batch)
+                 * 2) Si falla, admin-ajax.
                  */
                 function fetchExportBatch(payload) {
-                    return fetchViaPluginPage(payload)
+                    return fetchViaAdminPost(payload)
                         .then(function (response) {
                             if (response.ok) {
                                 return response;
@@ -548,7 +544,7 @@ class WC_Exporter_Admin {
                                 if (!response.ok) {
                                     var hint = '';
                                     if (response.status === 404) {
-                                        hint = ' Falló el POST a la página del plugin y el respaldo admin-ajax. Comprueba que el plugin esté activo y recarga esta pantalla.';
+                                        hint = ' Falló admin-post.php y el respaldo admin-ajax. Si el hosting bloquea wp-admin, pide revisar reglas WAF o lista blanca.';
                                     }
                                     if (response.status === 403) {
                                         hint = ' Recarga la página por si el nonce de seguridad caducó.';
@@ -619,7 +615,7 @@ class WC_Exporter_Admin {
                     statusBox.innerHTML = '';
                     var start = document.createElement('p');
                     start.style.margin = '0 0 12px 0';
-                    start.textContent = 'Iniciando exportación desde offset ' + String(startOffset) + ' (POST directo al panel del plugin; si falla, admin-ajax)…';
+                    start.textContent = 'Iniciando exportación desde offset ' + String(startOffset) + ' (admin-post.php; si falla, admin-ajax)…';
                     statusBox.appendChild(start);
                     exportBatch(startOffset);
                 });
