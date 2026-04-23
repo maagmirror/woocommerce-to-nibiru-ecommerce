@@ -324,14 +324,22 @@ class WC_Exporter_Admin {
                 }
 
                 function fetchViaRest(payload) {
+                    var ctrl = new AbortController();
+                    var tid = setTimeout(function () {
+                        ctrl.abort();
+                    }, 25000);
                     return fetch(restUrl, {
                         method: 'POST',
                         credentials: 'same-origin',
+                        cache: 'no-store',
+                        signal: ctrl.signal,
                         headers: {
                             'Content-Type': 'application/json',
                             'X-WP-Nonce': restNonce
                         },
                         body: JSON.stringify(payload)
+                    }).finally(function () {
+                        clearTimeout(tid);
                     });
                 }
 
@@ -339,6 +347,7 @@ class WC_Exporter_Admin {
                     return fetch(ajaxUrl, {
                         method: 'POST',
                         credentials: 'same-origin',
+                        cache: 'no-store',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: new URLSearchParams({
                             action: 'wc_export_products',
@@ -354,20 +363,31 @@ class WC_Exporter_Admin {
                 }
 
                 /**
-                 * Intenta primero la API REST; si devuelve 404/405 (ruta no disponible), usa admin-ajax.
+                 * Intenta REST primero; si falla, cuerpo rest_no_route, timeout o red → admin-ajax.
+                 * rest_no_route en el JSON = plugin desactualizado en el servidor o ruta no registrada.
                  */
                 function fetchExportBatch(payload) {
-                    return fetchViaRest(payload).then(function (response) {
-                        if (response.ok) {
-                            return response;
-                        }
-                        if (response.status === 404 || response.status === 405) {
-                            return fetchViaAjax(payload).then(function (r2) {
-                                return r2;
+                    return fetchViaRest(payload)
+                        .then(function (response) {
+                            return response.clone().text().then(function (text) {
+                                var useAjax = !response.ok;
+                                if (!useAjax && text) {
+                                    try {
+                                        var j = JSON.parse(text);
+                                        if (j && (j.code === 'rest_no_route' || j.code === 'rest_not_logged_in')) {
+                                            useAjax = true;
+                                        }
+                                    } catch (e) {}
+                                }
+                                if (useAjax) {
+                                    return fetchViaAjax(payload);
+                                }
+                                return response;
                             });
-                        }
-                        return response;
-                    });
+                        })
+                        .catch(function () {
+                            return fetchViaAjax(payload);
+                        });
                 }
 
                 function renderProductCard(p) {
@@ -497,7 +517,7 @@ class WC_Exporter_Admin {
                                 if (!response.ok) {
                                     var hint = '';
                                     if (response.status === 404) {
-                                        hint = ' Ni la ruta REST (/wp-json/…) ni admin-ajax respondieron. Revisa permalinks, .htaccess y reglas del servidor.';
+                                        hint = ' Ni REST ni admin-ajax devolvieron una respuesta OK. Revisa permalinks, .htaccess y la pestaña Red: filtra por «export» o mira el cuerpo de admin-ajax (debe ser JSON del plugin).';
                                     }
                                     if (response.status === 403) {
                                         hint = ' Recarga la página por si el nonce de seguridad caducó.';
@@ -521,6 +541,10 @@ class WC_Exporter_Admin {
                                     data = JSON.parse(text);
                                 } catch (e) {
                                     throw new Error('Respuesta no válida (¿HTML en lugar de JSON?). Primeros caracteres: ' + text.substring(0, 180));
+                                }
+
+                                if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+                                    throw new Error('El servidor devolvió JSON inesperado (no es un objeto). Si ves admin-ajax con 200, revisa avisos PHP o salida antes del JSON.');
                                 }
 
                                 if (data.success === false) {
@@ -564,7 +588,7 @@ class WC_Exporter_Admin {
                     statusBox.innerHTML = '';
                     var start = document.createElement('p');
                     start.style.margin = '0 0 12px 0';
-                    start.textContent = 'Iniciando exportación desde offset ' + String(startOffset) + ' (REST primero, luego admin-ajax si hace falta)…';
+                    start.textContent = 'Iniciando exportación desde offset ' + String(startOffset) + ' (REST; si falla, admin-ajax automáticamente)…';
                     statusBox.appendChild(start);
                     exportBatch(startOffset);
                 });
