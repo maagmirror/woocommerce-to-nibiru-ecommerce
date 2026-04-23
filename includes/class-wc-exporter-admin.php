@@ -11,6 +11,46 @@ class WC_Exporter_Admin {
     
     public function __construct() {
         add_action('admin_menu', array($this, 'add_admin_menu'));
+        add_action('load-toplevel_page_wc_exporter', array($this, 'handle_inline_batch_request'));
+    }
+    
+    /**
+     * Procesa un lote por POST directo a admin.php?page=wc_exporter (sin admin-ajax ni REST).
+     */
+    public function handle_inline_batch_request() {
+        if (empty($_POST['wc_exporter_inline']) || $_POST['wc_exporter_inline'] !== '1') {
+            return;
+        }
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json(array('success' => false, 'message' => 'No tienes permisos para realizar esta acción.'));
+            return;
+        }
+        
+        if (!isset($_POST['_wpnonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_wpnonce'])), 'wc_exporter_inline_batch')) {
+            wp_send_json(array('success' => false, 'message' => 'Sesión de seguridad caducada. Recarga esta página e inténtalo de nuevo.'));
+            return;
+        }
+        
+        if (!class_exists('WC_Exporter')) {
+            wp_send_json(array('success' => false, 'message' => 'Error interno del plugin.'));
+            return;
+        }
+        
+        ob_start();
+        $exporter = new WC_Exporter();
+        $result = $exporter->run_export_batch(
+            array(
+                'offset'           => isset($_POST['offset']) ? (int) $_POST['offset'] : 0,
+                'api_key'          => isset($_POST['api_key']) ? sanitize_text_field(wp_unslash($_POST['api_key'])) : '',
+                'api_url'          => isset($_POST['api_url']) ? sanitize_text_field(wp_unslash($_POST['api_url'])) : '',
+                'force_stock'      => !empty($_POST['force_stock']) && $_POST['force_stock'] === '1',
+                'force_categories' => !empty($_POST['force_categories']) && $_POST['force_categories'] === '1',
+                'show_log'         => !empty($_POST['show_log']) && $_POST['show_log'] === '1',
+            )
+        );
+        ob_end_clean();
+        wp_send_json($result);
     }
     
     /**
@@ -34,8 +74,8 @@ class WC_Exporter_Admin {
         $total_products = $this->get_total_products();
         $export_nonce = wp_create_nonce('wc_exporter_export');
         $ajax_url = admin_url('admin-ajax.php');
-        $rest_url = esc_url_raw(rest_url('wc-exporter/v1/export-batch'));
-        $rest_nonce = wp_create_nonce('wp_rest');
+        $plugin_page_url = admin_url('admin.php?page=wc_exporter');
+        $inline_batch_nonce = wp_create_nonce('wc_exporter_inline_batch');
         ?>
         <style>
             .wc-exp-wrap { max-width: 920px; }
@@ -203,8 +243,8 @@ class WC_Exporter_Admin {
             (function () {
                 var ajaxUrl = <?php echo wp_json_encode($ajax_url); ?>;
                 var exportNonce = <?php echo wp_json_encode($export_nonce); ?>;
-                var restUrl = <?php echo wp_json_encode($rest_url); ?>;
-                var restNonce = <?php echo wp_json_encode($rest_nonce); ?>;
+                var pluginPageUrl = <?php echo wp_json_encode($plugin_page_url); ?>;
+                var inlineBatchNonce = <?php echo wp_json_encode($inline_batch_nonce); ?>;
                 var STOR_KEY = 'wc_exporter_v1';
 
                 function readStore() {
@@ -323,23 +363,25 @@ class WC_Exporter_Admin {
                     };
                 }
 
-                function fetchViaRest(payload) {
-                    var ctrl = new AbortController();
-                    var tid = setTimeout(function () {
-                        ctrl.abort();
-                    }, 25000);
-                    return fetch(restUrl, {
+                /**
+                 * Mismo origen, misma sesión admin: evita /wp-json y admin-ajax (a menudo bloqueados o lentos).
+                 */
+                function fetchViaPluginPage(payload) {
+                    return fetch(pluginPageUrl, {
                         method: 'POST',
                         credentials: 'same-origin',
                         cache: 'no-store',
-                        signal: ctrl.signal,
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-WP-Nonce': restNonce
-                        },
-                        body: JSON.stringify(payload)
-                    }).finally(function () {
-                        clearTimeout(tid);
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: new URLSearchParams({
+                            wc_exporter_inline: '1',
+                            _wpnonce: inlineBatchNonce,
+                            api_key: payload.api_key,
+                            api_url: payload.api_url,
+                            show_log: payload.show_log ? '1' : '0',
+                            force_stock: payload.force_stock ? '1' : '0',
+                            force_categories: payload.force_categories ? '1' : '0',
+                            offset: String(payload.offset)
+                        })
                     });
                 }
 
@@ -363,27 +405,16 @@ class WC_Exporter_Admin {
                 }
 
                 /**
-                 * Intenta REST primero; si falla, cuerpo rest_no_route, timeout o red → admin-ajax.
-                 * rest_no_route en el JSON = plugin desactualizado en el servidor o ruta no registrada.
+                 * 1) POST a admin.php?page=wc_exporter (hook load-*)
+                 * 2) Si falla, admin-ajax (compatibilidad).
                  */
                 function fetchExportBatch(payload) {
-                    return fetchViaRest(payload)
+                    return fetchViaPluginPage(payload)
                         .then(function (response) {
-                            return response.clone().text().then(function (text) {
-                                var useAjax = !response.ok;
-                                if (!useAjax && text) {
-                                    try {
-                                        var j = JSON.parse(text);
-                                        if (j && (j.code === 'rest_no_route' || j.code === 'rest_not_logged_in')) {
-                                            useAjax = true;
-                                        }
-                                    } catch (e) {}
-                                }
-                                if (useAjax) {
-                                    return fetchViaAjax(payload);
-                                }
+                            if (response.ok) {
                                 return response;
-                            });
+                            }
+                            return fetchViaAjax(payload);
                         })
                         .catch(function () {
                             return fetchViaAjax(payload);
@@ -517,7 +548,7 @@ class WC_Exporter_Admin {
                                 if (!response.ok) {
                                     var hint = '';
                                     if (response.status === 404) {
-                                        hint = ' Ni REST ni admin-ajax devolvieron una respuesta OK. Revisa permalinks, .htaccess y la pestaña Red: filtra por «export» o mira el cuerpo de admin-ajax (debe ser JSON del plugin).';
+                                        hint = ' Falló el POST a la página del plugin y el respaldo admin-ajax. Comprueba que el plugin esté activo y recarga esta pantalla.';
                                     }
                                     if (response.status === 403) {
                                         hint = ' Recarga la página por si el nonce de seguridad caducó.';
@@ -588,7 +619,7 @@ class WC_Exporter_Admin {
                     statusBox.innerHTML = '';
                     var start = document.createElement('p');
                     start.style.margin = '0 0 12px 0';
-                    start.textContent = 'Iniciando exportación desde offset ' + String(startOffset) + ' (REST; si falla, admin-ajax automáticamente)…';
+                    start.textContent = 'Iniciando exportación desde offset ' + String(startOffset) + ' (POST directo al panel del plugin; si falla, admin-ajax)…';
                     statusBox.appendChild(start);
                     exportBatch(startOffset);
                 });

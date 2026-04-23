@@ -12,7 +12,16 @@ class WC_Exporter {
     private $api;
     private $category_mapping;
     
+    /**
+     * Evita registrar hooks duplicados si se instancia otra vez (p. ej. lote vía admin.php).
+     */
+    private static $hooks_registered = false;
+    
     public function __construct() {
+        if (self::$hooks_registered) {
+            return;
+        }
+        self::$hooks_registered = true;
         add_action('wp_ajax_wc_export_products', array($this, 'export_products'));
         add_action('rest_api_init', array($this, 'register_rest_routes'));
     }
@@ -121,7 +130,7 @@ class WC_Exporter {
      * @param array $args offset, api_key, api_url, force_stock, force_categories, show_log
      * @return array Respuesta lista para JSON
      */
-    private function run_export_batch(array $args) {
+    public function run_export_batch(array $args) {
         if (!function_exists('wc_get_products')) {
             return array('success' => false, 'message' => 'Error: WooCommerce no está disponible.');
         }

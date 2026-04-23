@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooCommerce Exporter to Nibiru Ecommerce
  * Description: Exporta productos y categorías de WooCommerce a Nibiru eCommerce en batches. Si la categoría del producto no existe en el ecommerce remoto, se crea. Puedes forzar la reexportación de categorías para ignorar el mapping previo.
- * Version: 2.3
+ * Version: 2.4
  * Author: Nibiru Team
  */
 
@@ -11,7 +11,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Definir constantes del plugin
-define('WC_EXPORTER_VERSION', '2.3');
+define('WC_EXPORTER_VERSION', '2.4');
 define('WC_EXPORTER_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('WC_EXPORTER_PLUGIN_URL', plugin_dir_url(__FILE__));
 
