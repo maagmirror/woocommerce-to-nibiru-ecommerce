@@ -29,6 +29,11 @@ class WC_Exporter {
             return;
         }
         
+        if (!isset($_POST['nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['nonce'])), 'wc_exporter_export')) {
+            wp_send_json(array('success' => false, 'message' => 'Sesión de seguridad caducada. Recarga esta página e inténtalo de nuevo.'));
+            return;
+        }
+        
         // Verificar que WooCommerce esté disponible
         if (!function_exists('wc_get_products')) {
             wp_send_json(array('success' => false, 'message' => 'Error: WooCommerce no está disponible.'));
@@ -83,36 +88,60 @@ class WC_Exporter {
                 wp_send_json(array(
                     'message' => 'No hay más productos para exportar.',
                     'exported_count' => 0,
-                    'next_offset' => null
+                    'next_offset' => null,
+                    'product_previews' => array(),
                 ));
                 return;
             }
             
+            $product_previews = array();
+            
             foreach ($products as $product) {
+                $preview = array(
+                    'title' => $product->get_name(),
+                    'sku' => '',
+                    'thumb_url' => $product->get_image_id() ? (string) wp_get_attachment_image_url($product->get_image_id(), 'thumbnail') : '',
+                    'status' => 'info',
+                    'detail' => '',
+                    'request_json' => null,
+                    'response_json' => null,
+                );
+                
                 try {
-                    $product_data = $this->process_product($product, $force_stock, $show_log, $log);
+                    $product_data = $this->process_product($product, $force_stock, $log);
+                    $preview['sku'] = isset($product_data['sku']) ? (string) $product_data['sku'] : '';
                     
-                    if ($product_data) {
-                        $response = $this->api->upload_product($product_data);
-                        
-                        if (is_wp_error($response)) {
-                            $log[] = "❌ Error en SKU {$product_data['sku']}: " . $response->get_error_message();
-                        } elseif (isset($response['error'])) {
-                            $log[] = "❌ Error en SKU {$product_data['sku']}: " . $response['error'];
-                        } else {
-                            // Formatear respuesta de forma legible
-                            $response_json = json_encode($response, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-                            $action = isset($response['action']) ? $response['action'] : 'unknown';
-                            $product_id = isset($response['product_id']) ? $response['product_id'] : 'N/A';
-                            $log[] = "✅ SKU {$product_data['sku']} - {$action} - Product ID: {$product_id}";
-                            if ($show_log) {
-                                $log[] = "Respuesta completa: <pre style='background:#e8f5e9;padding:5px;border:1px solid #4caf50;overflow:auto;max-height:200px;font-size:11px;'>" . htmlspecialchars($response_json, ENT_QUOTES, 'UTF-8') . "</pre>";
-                            }
+                    if ($show_log) {
+                        $preview['request_json'] = self::json_debug($product_data);
+                    }
+                    
+                    $response = $this->api->upload_product($product_data);
+                    
+                    if (is_wp_error($response)) {
+                        $preview['status'] = 'error';
+                        $preview['detail'] = $response->get_error_message();
+                        $log[] = "❌ Error en SKU {$product_data['sku']}: " . $response->get_error_message();
+                    } elseif (isset($response['error'])) {
+                        $preview['status'] = 'error';
+                        $preview['detail'] = (string) $response['error'];
+                        $log[] = "❌ Error en SKU {$product_data['sku']}: " . $response['error'];
+                    } else {
+                        $action = isset($response['action']) ? $response['action'] : 'unknown';
+                        $product_id_rem = isset($response['product_id']) ? $response['product_id'] : 'N/A';
+                        $preview['status'] = 'success';
+                        $preview['detail'] = "{$action} · ID remoto: {$product_id_rem}";
+                        $log[] = "✅ SKU {$product_data['sku']} - {$action} - Product ID: {$product_id_rem}";
+                        if ($show_log) {
+                            $preview['response_json'] = self::json_debug($response);
                         }
                     }
                 } catch (Exception $e) {
+                    $preview['status'] = 'error';
+                    $preview['detail'] = $e->getMessage();
                     $log[] = "Error procesando producto ID {$product->get_id()}: " . $e->getMessage();
                 }
+                
+                $product_previews[] = $preview;
             }
             
             $next_offset = count($products) == 10 ? $offset + 10 : null;
@@ -124,7 +153,8 @@ class WC_Exporter {
                 'success' => true,
                 'message' => implode('<br>', $log),
                 'exported_count' => count($products),
-                'next_offset' => $next_offset
+                'next_offset' => $next_offset,
+                'product_previews' => $product_previews,
             ));
             
         } catch (Exception $e) {
@@ -145,7 +175,7 @@ class WC_Exporter {
     /**
      * Procesa un producto y retorna sus datos para la API
      */
-    private function process_product($product, $force_stock, $show_log, &$log) {
+    private function process_product($product, $force_stock, &$log) {
         $product_id = $product->get_id();
         
         // Obtener moneda del producto
@@ -190,13 +220,19 @@ class WC_Exporter {
             $data['combinations'] = $variants_data['combinations'];
         }
         
-        if ($show_log) {
-            // Formatear JSON de forma legible para el log
-            $json_pretty = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            $log[] = "Datos enviados: <pre style='background:#f5f5f5;padding:10px;border:1px solid #ddd;overflow:auto;max-height:300px;'>" . htmlspecialchars($json_pretty, ENT_QUOTES, 'UTF-8') . "</pre>";
-        }
-        
         return $data;
+    }
+    
+    /**
+     * Serializa datos para depuración en la UI (UTF-8 tolerante).
+     */
+    private static function json_debug($data) {
+        $flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
+        if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+            $flags |= JSON_INVALID_UTF8_SUBSTITUTE;
+        }
+        $json = wp_json_encode($data, $flags);
+        return $json ? $json : '{"_error":"No se pudo serializar JSON"}';
     }
     
     /**

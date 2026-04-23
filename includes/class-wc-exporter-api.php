@@ -30,6 +30,14 @@ class WC_Exporter_API {
             return $response;
         }
         
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return new WP_Error(
+                'http_error',
+                sprintf('Error HTTP: %d %s', (int) $code, wp_remote_retrieve_response_message($response))
+            );
+        }
+        
         $body = json_decode(wp_remote_retrieve_body($response), true);
         return $body;
     }
@@ -55,6 +63,14 @@ class WC_Exporter_API {
             return $response;
         }
         
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return new WP_Error(
+                'http_error',
+                sprintf('Error HTTP: %d %s', (int) $code, wp_remote_retrieve_response_message($response))
+            );
+        }
+        
         $body = json_decode(wp_remote_retrieve_body($response), true);
         return $body;
     }
@@ -77,6 +93,14 @@ class WC_Exporter_API {
         
         if (is_wp_error($response)) {
             return $response;
+        }
+        
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return new WP_Error(
+                'http_error',
+                sprintf('Error HTTP: %d %s', (int) $code, wp_remote_retrieve_response_message($response))
+            );
         }
         
         $body = json_decode(wp_remote_retrieve_body($response), true);
