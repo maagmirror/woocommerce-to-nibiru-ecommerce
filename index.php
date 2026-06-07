@@ -16,6 +16,7 @@ define('WC_EXPORTER_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('WC_EXPORTER_PLUGIN_URL', plugin_dir_url(__FILE__));
 
 // Cargar clases
+require_once WC_EXPORTER_PLUGIN_DIR . 'includes/class-wc-exporter-logger.php';
 require_once WC_EXPORTER_PLUGIN_DIR . 'includes/class-wc-exporter-currency.php';
 require_once WC_EXPORTER_PLUGIN_DIR . 'includes/class-wc-exporter-api.php';
 require_once WC_EXPORTER_PLUGIN_DIR . 'includes/class-wc-exporter.php';

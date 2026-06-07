@@ -236,6 +236,7 @@ class WC_Exporter {
                         }
                         $product_previews[] = $preview;
                         $log[] = "🛑 Exportación detenida en SKU {$preview['sku']} por error de marca: " . $this->brand_error;
+                        WC_Exporter_Logger::log("Detenido en SKU {$preview['sku']} por error de marca: " . $this->brand_error);
 
                         return array(
                             'success'          => true,
@@ -257,10 +258,12 @@ class WC_Exporter {
                         $preview['status'] = 'error';
                         $preview['detail'] = $response->get_error_message();
                         $log[] = "❌ Error en SKU {$product_data['sku']}: " . $response->get_error_message();
+                        WC_Exporter_Logger::log("Error subiendo SKU {$product_data['sku']}: " . $response->get_error_message());
                     } elseif (isset($response['error'])) {
                         $preview['status'] = 'error';
                         $preview['detail'] = (string) $response['error'];
                         $log[] = "❌ Error en SKU {$product_data['sku']}: " . $response['error'];
+                        WC_Exporter_Logger::log("Error API en SKU {$product_data['sku']}: " . $response['error']);
                     } else {
                         $action = isset($response['action']) ? $response['action'] : 'unknown';
                         $product_id_rem = isset($response['product_id']) ? $response['product_id'] : 'N/A';
@@ -275,6 +278,7 @@ class WC_Exporter {
                     $preview['status'] = 'error';
                     $preview['detail'] = $e->getMessage();
                     $log[] = "Error procesando producto ID {$product->get_id()}: " . $e->getMessage();
+                    WC_Exporter_Logger::log("Excepción procesando producto ID {$product->get_id()}: " . $e->getMessage());
                 }
                 
                 $product_previews[] = $preview;
@@ -290,11 +294,13 @@ class WC_Exporter {
                 'product_previews' => $product_previews,
             );
         } catch (Exception $e) {
+            WC_Exporter_Logger::log('Error fatal: ' . $e->getMessage() . ' en línea ' . $e->getLine());
             return array(
                 'success' => false,
                 'message' => 'Error fatal: ' . $e->getMessage() . ' en línea ' . $e->getLine(),
             );
         } catch (Error $e) {
+            WC_Exporter_Logger::log('Error fatal PHP: ' . $e->getMessage() . ' en línea ' . $e->getLine() . ' del archivo ' . $e->getFile());
             return array(
                 'success' => false,
                 'message' => 'Error fatal PHP: ' . $e->getMessage() . ' en línea ' . $e->getLine() . ' del archivo ' . $e->getFile(),
@@ -323,9 +329,11 @@ class WC_Exporter {
                 }
                 sleep(60);
 
+                WC_Exporter_Logger::log("Error {$status} subiendo SKU {$sku}. Reintentando tras 60s.", 'WARN');
                 $response = $this->api->upload_product($product_data);
                 if (is_wp_error($response)) {
                     $log[] = "Reintento falló para SKU {$sku}: " . $response->get_error_message();
+                    WC_Exporter_Logger::log("Reintento falló para SKU {$sku}: " . $response->get_error_message());
                 } else {
                     $log[] = "✅ Reintento OK para SKU {$sku}.";
                 }
@@ -796,6 +804,7 @@ class WC_Exporter {
 
         if (is_wp_error($response)) {
             $log[] = "Error al crear marca '{$name}': " . $response->get_error_message();
+            WC_Exporter_Logger::log("Error al crear marca '{$name}': " . $response->get_error_message());
             return 0;
         }
 
@@ -808,6 +817,7 @@ class WC_Exporter {
 
         $msg = isset($response['error']) ? $response['error'] : (isset($response['message']) ? $response['message'] : 'Respuesta inesperada.');
         $log[] = "Error al crear marca '{$name}': {$msg}";
+        WC_Exporter_Logger::log("Error al crear marca '{$name}': {$msg}");
         return 0;
     }
 

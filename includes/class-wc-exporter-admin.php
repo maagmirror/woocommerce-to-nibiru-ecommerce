@@ -12,6 +12,7 @@ class WC_Exporter_Admin {
     public function __construct() {
         add_action('admin_menu', array($this, 'add_admin_menu'));
         add_action('admin_post_wc_exporter_run_batch', array($this, 'handle_admin_post_batch'));
+        add_action('admin_post_wc_exporter_clear_log', array($this, 'handle_clear_log'));
     }
     
     /**
@@ -64,6 +65,62 @@ class WC_Exporter_Admin {
             array($this, 'admin_page'),
             'dashicons-download'
         );
+
+        add_submenu_page(
+            'wc_exporter',
+            'Log de errores',
+            'Log de errores',
+            'manage_options',
+            'wc_exporter_log',
+            array($this, 'log_page')
+        );
+    }
+
+    /**
+     * Vacía el log del plugin (admin-post) y vuelve a la pestaña de log.
+     */
+    public function handle_clear_log() {
+        if (!current_user_can('manage_options')) {
+            wp_die('No tienes permisos para realizar esta acción.');
+        }
+        if (!isset($_POST['_wpnonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_wpnonce'])), 'wc_exporter_clear_log')) {
+            wp_die('Sesión de seguridad caducada. Recarga la página e inténtalo de nuevo.');
+        }
+        WC_Exporter_Logger::clear();
+        wp_safe_redirect(add_query_arg(array('page' => 'wc_exporter_log', 'cleared' => '1'), admin_url('admin.php')));
+        exit;
+    }
+
+    /**
+     * Pestaña que muestra el log de errores del plugin.
+     */
+    public function log_page() {
+        $content = WC_Exporter_Logger::read();
+        $path = WC_Exporter_Logger::get_file_path();
+        ?>
+        <div class="wrap">
+            <h1>Log de errores · woo to nibiru</h1>
+            <?php if (isset($_GET['cleared'])) : ?>
+                <div class="notice notice-success is-dismissible"><p>Log borrado.</p></div>
+            <?php endif; ?>
+            <p class="description">
+                Errores de la exportación (subida de productos, marcas, fallos del servidor). Archivo:
+                <code><?php echo esc_html($path); ?></code>. Se muestran las últimas entradas.
+            </p>
+            <p>
+                <a href="<?php echo esc_url(add_query_arg(array('page' => 'wc_exporter_log'), admin_url('admin.php'))); ?>" class="button">Actualizar</a>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;"
+                    onsubmit="return confirm('¿Borrar todo el log?');">
+                    <input type="hidden" name="action" value="wc_exporter_clear_log">
+                    <?php wp_nonce_field('wc_exporter_clear_log'); ?>
+                    <button type="submit" class="button button-secondary">Borrar log</button>
+                </form>
+            </p>
+            <textarea readonly style="width:100%; height:520px; font-family:Menlo,Consolas,monospace; font-size:12px; white-space:pre; overflow:auto;"><?php
+                echo esc_textarea($content !== '' ? $content : 'El log está vacío.');
+            ?></textarea>
+        </div>
+        <?php
     }
     
     /**
@@ -684,7 +741,7 @@ class WC_Exporter_Admin {
                                     updateResumeHint();
                                     var stop = document.createElement('p');
                                     stop.style.cssText = 'color:#b32d2e;font-weight:600;margin:12px 0 0 0;';
-                                    stop.textContent = 'Exportación detenida por un error de marca. Revisá el log, corregí y volvé a iniciar (se reanuda desde este lote).';
+                                    stop.textContent = 'Exportación detenida por un error de marca. Revisá la pestaña «Log de errores», corregí y volvé a iniciar (se reanuda desde este lote).';
                                     statusBox.appendChild(stop);
                                     statusBox.scrollTop = statusBox.scrollHeight;
                                     return;
