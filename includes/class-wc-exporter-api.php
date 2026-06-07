@@ -159,10 +159,11 @@ class WC_Exporter_API {
         if ($code < 200 || $code >= 300) {
             return new WP_Error(
                 'http_error',
-                sprintf('Error HTTP: %d %s', (int) $code, wp_remote_retrieve_response_message($response))
+                sprintf('Error HTTP: %d %s', (int) $code, wp_remote_retrieve_response_message($response)),
+                array('status' => (int) $code)
             );
         }
-        
+
         $body = json_decode(wp_remote_retrieve_body($response), true);
         return $body;
     }

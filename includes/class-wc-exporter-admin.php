@@ -675,6 +675,21 @@ class WC_Exporter_Admin {
                                     return;
                                 }
 
+                                if (data.stopped) {
+                                    appendBatch(statusBox, data);
+                                    exportedCount += data.exported_count || 0;
+                                    document.getElementById('exported_products').textContent = String(exportedCount);
+                                    // Se reanuda desde este mismo lote tras corregir la marca.
+                                    mergeStore({ last_session_exported: exportedCount, resume_offset: offset });
+                                    updateResumeHint();
+                                    var stop = document.createElement('p');
+                                    stop.style.cssText = 'color:#b32d2e;font-weight:600;margin:12px 0 0 0;';
+                                    stop.textContent = 'Exportación detenida por un error de marca. Revisá el log, corregí y volvé a iniciar (se reanuda desde este lote).';
+                                    statusBox.appendChild(stop);
+                                    statusBox.scrollTop = statusBox.scrollHeight;
+                                    return;
+                                }
+
                                 appendBatch(statusBox, data);
                                 exportedCount += data.exported_count || 0;
                                 document.getElementById('exported_products').textContent = String(exportedCount);

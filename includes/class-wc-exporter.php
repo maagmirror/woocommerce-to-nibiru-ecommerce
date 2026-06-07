@@ -15,6 +15,7 @@ class WC_Exporter {
     private $brand_source = '';
     private $brand_attribute = '';
     private $last_brand_label = '';
+    private $brand_error = '';
     private $api_base_url = '';
     
     /**
@@ -224,13 +225,34 @@ class WC_Exporter {
                     $product_data = $this->process_product($product, $force_stock, $log);
                     $preview['sku'] = isset($product_data['sku']) ? (string) $product_data['sku'] : '';
                     $preview['brand'] = $this->last_brand_label;
-                    
+
+                    // Si la exportación de marca está activada y falla, no se sube el producto: se detiene todo.
+                    if ($this->brand_error !== '') {
+                        $exported_before = count($product_previews);
+                        $preview['status'] = 'error';
+                        $preview['detail'] = 'Marca: ' . $this->brand_error;
+                        if ($show_log) {
+                            $preview['request_json'] = self::json_debug($product_data);
+                        }
+                        $product_previews[] = $preview;
+                        $log[] = "🛑 Exportación detenida en SKU {$preview['sku']} por error de marca: " . $this->brand_error;
+
+                        return array(
+                            'success'          => true,
+                            'stopped'          => true,
+                            'message'          => implode('<br>', $log),
+                            'exported_count'   => $exported_before,
+                            'next_offset'      => null,
+                            'product_previews' => $product_previews,
+                        );
+                    }
+
                     if ($show_log) {
                         $preview['request_json'] = self::json_debug($product_data);
                     }
-                    
-                    $response = $this->api->upload_product($product_data);
-                    
+
+                    $response = $this->upload_product_with_retry($product_data, $log);
+
                     if (is_wp_error($response)) {
                         $preview['status'] = 'error';
                         $preview['detail'] = $response->get_error_message();
@@ -280,6 +302,39 @@ class WC_Exporter {
         }
     }
     
+    /**
+     * Sube un producto y, ante error 5xx (servidor), espera 60s y reintenta una vez antes de continuar.
+     *
+     * @return array|WP_Error Respuesta de la API.
+     */
+    private function upload_product_with_retry($product_data, &$log) {
+        $sku = isset($product_data['sku']) ? $product_data['sku'] : '?';
+        $response = $this->api->upload_product($product_data);
+
+        if (is_wp_error($response)) {
+            $err_data = $response->get_error_data();
+            $status = (is_array($err_data) && isset($err_data['status'])) ? (int) $err_data['status'] : 0;
+
+            if ($status >= 500) {
+                $log[] = "⏳ Error {$status} subiendo SKU {$sku}. Espero 60s y reintento una vez…";
+                // Evita que max_execution_time corte la espera.
+                if (function_exists('set_time_limit')) {
+                    @set_time_limit(0);
+                }
+                sleep(60);
+
+                $response = $this->api->upload_product($product_data);
+                if (is_wp_error($response)) {
+                    $log[] = "Reintento falló para SKU {$sku}: " . $response->get_error_message();
+                } else {
+                    $log[] = "✅ Reintento OK para SKU {$sku}.";
+                }
+            }
+        }
+
+        return $response;
+    }
+
     /**
      * Procesa un producto y retorna sus datos para la API
      */
@@ -614,6 +669,7 @@ class WC_Exporter {
      */
     private function process_brand($product, &$log) {
         $this->last_brand_label = '';
+        $this->brand_error = '';
 
         $taxonomy = $this->resolve_brand_taxonomy();
         if ($taxonomy === '') {
@@ -621,18 +677,23 @@ class WC_Exporter {
         }
 
         if (!taxonomy_exists($taxonomy)) {
-            $log[] = "Marca: la taxonomía '{$taxonomy}' no existe en este sitio; se omite.";
+            $msg = "La taxonomía de marca '{$taxonomy}' no existe en este sitio.";
+            $log[] = "Marca: {$msg}";
             $this->last_brand_label = "Marca: taxonomía '{$taxonomy}' inexistente";
+            $this->brand_error = $msg;
             return 0;
         }
 
         $terms = wp_get_post_terms($product->get_id(), $taxonomy, array('fields' => 'all'));
         if (is_wp_error($terms)) {
-            $log[] = "Marca: error al leer '{$taxonomy}': " . $terms->get_error_message();
+            $msg = "Error al leer la marca en '{$taxonomy}': " . $terms->get_error_message();
+            $log[] = "Marca: {$msg}";
             $this->last_brand_label = 'Marca: error al leer término';
+            $this->brand_error = $msg;
             return 0;
         }
         if (empty($terms)) {
+            // Producto sin marca asignada: no es un error, se continúa sin brand_id.
             $log[] = "Producto ID {$product->get_id()} sin marca en '{$taxonomy}'.";
             $this->last_brand_label = 'Sin marca asignada';
             return 0;
@@ -644,7 +705,8 @@ class WC_Exporter {
         if ($brand_id > 0) {
             $this->last_brand_label = "{$name} (#{$brand_id})";
         } else {
-            $this->last_brand_label = "{$name} — error al crear (ver log)";
+            $this->last_brand_label = "{$name} — no se pudo crear/resolver";
+            $this->brand_error = "No se pudo crear ni encontrar la marca '{$name}' en nibiru (ver log).";
         }
 
         return $brand_id;
