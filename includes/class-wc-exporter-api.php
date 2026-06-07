@@ -76,8 +76,68 @@ class WC_Exporter_API {
     }
     
     /**
+     * Obtiene todas las marcas del ecommerce remoto (GET /api/brands).
+     * La respuesta es un array plano de marcas.
+     *
+     * @return array|WP_Error Array con marcas o error
+     */
+    public function get_brands() {
+        $url = "{$this->api_url}/api/brands?apikey={$this->api_key}";
+        $response = wp_remote_get($url, array('timeout' => 15));
+
+        if (is_wp_error($response)) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return new WP_Error(
+                'http_error',
+                sprintf('Error HTTP: %d %s', (int) $code, wp_remote_retrieve_response_message($response))
+            );
+        }
+
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        return $body;
+    }
+
+    /**
+     * Crea o actualiza una marca en el ecommerce remoto (POST /api/upload-brand).
+     * Campos: name (obligatorio), image_url (obligatorio para crear), title_meta_tag,
+     * description, keywords, content; apikey se añade aquí.
+     *
+     * @param array $brand_data Datos de la marca
+     * @return array|WP_Error Respuesta de la API o error
+     */
+    public function create_brand($brand_data) {
+        $url = "{$this->api_url}/api/upload-brand";
+        $data = array_merge(array('apikey' => $this->api_key), $brand_data);
+
+        $response = wp_remote_post($url, array(
+            'timeout' => 15,
+            'body' => json_encode($data),
+            'headers' => array('Content-Type' => 'application/json')
+        ));
+
+        if (is_wp_error($response)) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return new WP_Error(
+                'http_error',
+                sprintf('Error HTTP: %d %s', (int) $code, wp_remote_retrieve_response_message($response))
+            );
+        }
+
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        return $body;
+    }
+
+    /**
      * Sube un producto al ecommerce remoto
-     * 
+     *
      * @param array $product_data Datos del producto
      * @return array|WP_Error Respuesta de la API o error
      */

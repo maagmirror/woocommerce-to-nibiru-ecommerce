@@ -42,7 +42,10 @@ class WC_Exporter_Admin {
                 'api_url'          => isset($_POST['api_url']) ? sanitize_text_field(wp_unslash($_POST['api_url'])) : '',
                 'force_stock'      => !empty($_POST['force_stock']) && $_POST['force_stock'] === '1',
                 'force_categories' => !empty($_POST['force_categories']) && $_POST['force_categories'] === '1',
+                'force_brands'     => !empty($_POST['force_brands']) && $_POST['force_brands'] === '1',
                 'show_log'         => !empty($_POST['show_log']) && $_POST['show_log'] === '1',
+                'brand_source'     => isset($_POST['brand_source']) ? sanitize_key(wp_unslash($_POST['brand_source'])) : '',
+                'brand_attribute'  => isset($_POST['brand_attribute']) ? sanitize_key(wp_unslash($_POST['brand_attribute'])) : '',
             )
         );
         ob_end_clean();
@@ -68,6 +71,9 @@ class WC_Exporter_Admin {
      */
     public function admin_page() {
         $total_products = $this->get_total_products();
+        $has_native_brands = taxonomy_exists('product_brand');
+        $has_pwb_brands = taxonomy_exists('pwb-brand');
+        $attribute_taxonomies = function_exists('wc_get_attribute_taxonomies') ? wc_get_attribute_taxonomies() : array();
         $export_nonce = wp_create_nonce('wc_exporter_export');
         $ajax_url = admin_url('admin-ajax.php');
         $admin_post_url = admin_url('admin-post.php');
@@ -218,7 +224,43 @@ class WC_Exporter_Admin {
                 
                 <label for="force_categories">Forzar reexportar categorías:</label>
                 <input type="checkbox" id="force_categories" name="force_categories" checked>
-                
+
+                <label for="brand_source" style="margin-top:6px;">Exportar marcas desde:</label>
+                <select id="brand_source" name="brand_source">
+                    <option value="">No exportar marcas</option>
+                    <option value="product_tag">Etiquetas de producto (product_tag)</option>
+                    <option value="product_brand"<?php echo $has_native_brands ? '' : ' disabled'; ?>>
+                        Marcas nativas de WooCommerce<?php echo $has_native_brands ? '' : ' (no disponible)'; ?>
+                    </option>
+                    <option value="pwb-brand"<?php echo $has_pwb_brands ? '' : ' disabled'; ?>>
+                        Perfect Brands for WooCommerce<?php echo $has_pwb_brands ? '' : ' (no disponible)'; ?>
+                    </option>
+                    <option value="attribute"<?php echo !empty($attribute_taxonomies) ? '' : ' disabled'; ?>>
+                        Atributo de producto<?php echo !empty($attribute_taxonomies) ? '' : ' (no hay atributos)'; ?>
+                    </option>
+                </select>
+
+                <div id="brand_attribute_wrap" style="display:none;">
+                    <label for="brand_attribute">Atributo a usar como marca:</label>
+                    <select id="brand_attribute" name="brand_attribute">
+                        <?php foreach ($attribute_taxonomies as $att) :
+                            $tax = 'pa_' . $att->attribute_name; ?>
+                            <option value="<?php echo esc_attr($tax); ?>">
+                                <?php echo esc_html($att->attribute_label . ' (' . $tax . ')'); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <p class="description" style="margin:0;">
+                    Para crear una marca nueva en nibiru se necesita imagen. Las marcas nativas y Perfect Brands
+                    usan la imagen del término; etiquetas y atributos no tienen imagen, así que esas marcas deben
+                    existir previamente en la tienda o crearse a mano.
+                </p>
+
+                <label for="force_brands">Forzar reexportar marcas:</label>
+                <input type="checkbox" id="force_brands" name="force_brands">
+
                 <label for="reset_progress" style="margin-top:6px;">Empezar desde el primer producto (ignora progreso guardado en este navegador):</label>
                 <input type="checkbox" id="reset_progress" name="reset_progress">
                 
@@ -276,8 +318,18 @@ class WC_Exporter_Admin {
                         api_url: document.getElementById('api_url').value,
                         show_log: document.getElementById('show_log').checked,
                         force_stock: document.getElementById('force_stock').checked,
-                        force_categories: document.getElementById('force_categories').checked
+                        force_categories: document.getElementById('force_categories').checked,
+                        force_brands: document.getElementById('force_brands').checked,
+                        brand_source: document.getElementById('brand_source').value,
+                        brand_attribute: document.getElementById('brand_attribute') ? document.getElementById('brand_attribute').value : ''
                     });
+                }
+
+                function toggleBrandAttr() {
+                    var wrap = document.getElementById('brand_attribute_wrap');
+                    if (wrap) {
+                        wrap.style.display = (document.getElementById('brand_source').value === 'attribute') ? 'block' : 'none';
+                    }
                 }
 
                 var saveTimer;
@@ -318,14 +370,33 @@ class WC_Exporter_Admin {
                     if (typeof s.force_categories === 'boolean') {
                         document.getElementById('force_categories').checked = s.force_categories;
                     }
+                    if (typeof s.force_brands === 'boolean') {
+                        document.getElementById('force_brands').checked = s.force_brands;
+                    }
+                    if (typeof s.brand_source === 'string') {
+                        var bsEl = document.getElementById('brand_source');
+                        if (bsEl.querySelector('option[value="' + s.brand_source + '"]:not([disabled])')) {
+                            bsEl.value = s.brand_source;
+                        }
+                    }
+                    if (typeof s.brand_attribute === 'string' && document.getElementById('brand_attribute')) {
+                        var baEl = document.getElementById('brand_attribute');
+                        if (baEl.querySelector('option[value="' + s.brand_attribute + '"]')) {
+                            baEl.value = s.brand_attribute;
+                        }
+                    }
+                    toggleBrandAttr();
                     if (typeof s.last_session_exported === 'number' && s.last_session_exported >= 0) {
                         document.getElementById('exported_products').textContent = String(s.last_session_exported);
                     }
                     updateResumeHint();
                 }
 
-                ['api_key', 'api_url', 'show_log', 'force_stock', 'force_categories'].forEach(function (id) {
+                ['api_key', 'api_url', 'show_log', 'force_stock', 'force_categories', 'force_brands', 'brand_source', 'brand_attribute'].forEach(function (id) {
                     var el = document.getElementById(id);
+                    if (!el) {
+                        return;
+                    }
                     el.addEventListener('change', function () {
                         scheduleSaveForm();
                         updateResumeHint();
@@ -334,6 +405,7 @@ class WC_Exporter_Admin {
                         el.addEventListener('input', scheduleSaveForm);
                     }
                 });
+                document.getElementById('brand_source').addEventListener('change', toggleBrandAttr);
                 document.getElementById('reset_progress').addEventListener('change', updateResumeHint);
 
                 document.getElementById('wc_clear_saved').addEventListener('click', function () {
@@ -348,14 +420,17 @@ class WC_Exporter_Admin {
 
                 restoreFormFromStore();
 
-                function buildPayload(offset, apiKey, apiUrl, showLog, forceStock, forceCategories) {
+                function buildPayload(offset, apiKey, apiUrl, showLog, forceStock, forceCategories, forceBrands, brandSource, brandAttribute) {
                     return {
                         offset: offset,
                         api_key: apiKey,
                         api_url: apiUrl,
                         show_log: showLog,
                         force_stock: forceStock,
-                        force_categories: forceCategories
+                        force_categories: forceCategories,
+                        force_brands: forceBrands,
+                        brand_source: brandSource,
+                        brand_attribute: brandAttribute
                     };
                 }
 
@@ -376,6 +451,9 @@ class WC_Exporter_Admin {
                             show_log: payload.show_log ? '1' : '0',
                             force_stock: payload.force_stock ? '1' : '0',
                             force_categories: payload.force_categories ? '1' : '0',
+                            force_brands: payload.force_brands ? '1' : '0',
+                            brand_source: payload.brand_source || '',
+                            brand_attribute: payload.brand_attribute || '',
                             offset: String(payload.offset)
                         })
                     });
@@ -395,6 +473,9 @@ class WC_Exporter_Admin {
                             show_log: payload.show_log ? '1' : '0',
                             force_stock: payload.force_stock ? '1' : '0',
                             force_categories: payload.force_categories ? '1' : '0',
+                            force_brands: payload.force_brands ? '1' : '0',
+                            brand_source: payload.brand_source || '',
+                            brand_attribute: payload.brand_attribute || '',
                             offset: String(payload.offset)
                         })
                     });
@@ -448,6 +529,13 @@ class WC_Exporter_Admin {
                     sku.className = 'wc-exp-card-meta';
                     sku.textContent = 'SKU: ' + (p.sku || '—');
                     body.appendChild(sku);
+
+                    if (p.brand) {
+                        var brand = document.createElement('p');
+                        brand.className = 'wc-exp-card-meta';
+                        brand.textContent = 'Marca: ' + p.brand;
+                        body.appendChild(brand);
+                    }
 
                     if (p.detail) {
                         var det = document.createElement('p');
@@ -512,6 +600,10 @@ class WC_Exporter_Admin {
                     var showLog = document.getElementById('show_log').checked;
                     var forceStock = document.getElementById('force_stock').checked;
                     var forceCategories = document.getElementById('force_categories').checked;
+                    var forceBrands = document.getElementById('force_brands').checked;
+                    var brandSource = document.getElementById('brand_source').value;
+                    var brandAttrEl = document.getElementById('brand_attribute');
+                    var brandAttribute = (brandSource === 'attribute' && brandAttrEl) ? brandAttrEl.value : '';
                     var resetProgress = document.getElementById('reset_progress').checked;
                     var statusBox = document.getElementById('export_status');
 
@@ -538,7 +630,7 @@ class WC_Exporter_Admin {
                     document.getElementById('exported_products').textContent = String(exportedCount);
 
                     function exportBatch(offset) {
-                        var payload = buildPayload(offset, apiKey, apiUrl, showLog, forceStock, forceCategories);
+                        var payload = buildPayload(offset, apiKey, apiUrl, showLog, forceStock, forceCategories, forceBrands, brandSource, brandAttribute);
                         fetchExportBatch(payload)
                             .then(function (response) {
                                 if (!response.ok) {

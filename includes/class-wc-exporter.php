@@ -11,6 +11,10 @@ class WC_Exporter {
     
     private $api;
     private $category_mapping;
+    private $brand_mapping;
+    private $brand_source = '';
+    private $brand_attribute = '';
+    private $last_brand_label = '';
     
     /**
      * Evita registrar hooks duplicados si se instancia otra vez (p. ej. lote vía admin.php).
@@ -74,10 +78,13 @@ class WC_Exporter {
                 'api_url'          => isset($body['api_url']) ? sanitize_text_field((string) $body['api_url']) : '',
                 'force_stock'      => $this->coerce_bool($body['force_stock'] ?? false),
                 'force_categories' => $this->coerce_bool($body['force_categories'] ?? false),
+                'force_brands'     => $this->coerce_bool($body['force_brands'] ?? false),
                 'show_log'         => $this->coerce_bool($body['show_log'] ?? false),
+                'brand_source'     => isset($body['brand_source']) ? sanitize_key((string) $body['brand_source']) : '',
+                'brand_attribute'  => isset($body['brand_attribute']) ? sanitize_key((string) $body['brand_attribute']) : '',
             )
         );
-        
+
         return new WP_REST_Response($result, 200);
     }
     
@@ -116,10 +123,13 @@ class WC_Exporter {
                 'api_url'          => isset($_POST['api_url']) ? sanitize_text_field(wp_unslash($_POST['api_url'])) : '',
                 'force_stock'      => !empty($_POST['force_stock']) && $_POST['force_stock'] === '1',
                 'force_categories' => !empty($_POST['force_categories']) && $_POST['force_categories'] === '1',
+                'force_brands'     => !empty($_POST['force_brands']) && $_POST['force_brands'] === '1',
                 'show_log'         => !empty($_POST['show_log']) && $_POST['show_log'] === '1',
+                'brand_source'     => isset($_POST['brand_source']) ? sanitize_key(wp_unslash($_POST['brand_source'])) : '',
+                'brand_attribute'  => isset($_POST['brand_attribute']) ? sanitize_key(wp_unslash($_POST['brand_attribute'])) : '',
             )
         );
-        
+
         ob_end_clean();
         wp_send_json($result);
     }
@@ -149,16 +159,26 @@ class WC_Exporter {
         $api_url = rtrim($api_url, '/');
         $force_stock = !empty($args['force_stock']);
         $force_categories = !empty($args['force_categories']);
+        $force_brands = !empty($args['force_brands']);
         $show_log = !empty($args['show_log']);
-        
+        $this->brand_source = isset($args['brand_source']) ? (string) $args['brand_source'] : '';
+        $this->brand_attribute = isset($args['brand_attribute']) ? (string) $args['brand_attribute'] : '';
+
         try {
             $this->api = new WC_Exporter_API($api_key, $api_url);
-            
+
             if ($force_categories) {
                 $this->category_mapping = array();
                 update_option('wc_exporter_category_mapping', $this->category_mapping);
             } else {
                 $this->category_mapping = get_option('wc_exporter_category_mapping', array());
+            }
+
+            if ($force_brands) {
+                $this->brand_mapping = array();
+                update_option('wc_exporter_brand_mapping', $this->brand_mapping);
+            } else {
+                $this->brand_mapping = get_option('wc_exporter_brand_mapping', array());
             }
             
             $products = wc_get_products(
@@ -193,13 +213,15 @@ class WC_Exporter {
                     'thumb_url'     => $product->get_image_id() ? (string) wp_get_attachment_image_url($product->get_image_id(), 'thumbnail') : '',
                     'status'        => 'info',
                     'detail'        => '',
+                    'brand'         => '',
                     'request_json'  => null,
                     'response_json' => null,
                 );
-                
+
                 try {
                     $product_data = $this->process_product($product, $force_stock, $log);
                     $preview['sku'] = isset($product_data['sku']) ? (string) $product_data['sku'] : '';
+                    $preview['brand'] = $this->last_brand_label;
                     
                     if ($show_log) {
                         $preview['request_json'] = self::json_debug($product_data);
@@ -296,7 +318,13 @@ class WC_Exporter {
         // Procesar categoría
         $category_id = $this->process_category($product, $log);
         $data['category_id'] = $category_id;
-        
+
+        // Procesar marca (según la fuente elegida en el panel)
+        $brand_id = $this->process_brand($product, $log);
+        if ($brand_id > 0) {
+            $data['brand_id'] = $brand_id;
+        }
+
         // Procesar variantes si es producto variable
         if ($product->is_type('variable')) {
             $variants_data = $this->process_variants($product, $currency, $force_stock, $log);
@@ -557,6 +585,184 @@ class WC_Exporter {
         }
     }
     
+    /**
+     * Devuelve la taxonomía de origen de marcas según la opción elegida en el panel.
+     *
+     * @return string Slug de taxonomía, o '' si no se exportan marcas.
+     */
+    private function resolve_brand_taxonomy() {
+        switch ($this->brand_source) {
+            case 'product_tag':   // Etiquetas de producto usadas como marca
+                return 'product_tag';
+            case 'product_brand': // Marcas nativas de WooCommerce (9.6+)
+                return 'product_brand';
+            case 'pwb-brand':     // Plugin Perfect Brands for WooCommerce
+                return 'pwb-brand';
+            case 'attribute':     // Atributo global elegido (p. ej. pa_marca)
+                return $this->brand_attribute;
+            default:
+                return '';
+        }
+    }
+
+    /**
+     * Procesa la marca del producto según la fuente configurada y la garantiza en remoto.
+     *
+     * @return int brand_id remoto, o 0 si no aplica / no se pudo resolver.
+     */
+    private function process_brand($product, &$log) {
+        $this->last_brand_label = '';
+
+        $taxonomy = $this->resolve_brand_taxonomy();
+        if ($taxonomy === '') {
+            return 0; // Exportación de marcas desactivada
+        }
+
+        if (!taxonomy_exists($taxonomy)) {
+            $log[] = "Marca: la taxonomía '{$taxonomy}' no existe en este sitio; se omite.";
+            $this->last_brand_label = "Marca: taxonomía '{$taxonomy}' inexistente";
+            return 0;
+        }
+
+        $terms = wp_get_post_terms($product->get_id(), $taxonomy, array('fields' => 'all'));
+        if (is_wp_error($terms)) {
+            $log[] = "Marca: error al leer '{$taxonomy}': " . $terms->get_error_message();
+            $this->last_brand_label = 'Marca: error al leer término';
+            return 0;
+        }
+        if (empty($terms)) {
+            $log[] = "Producto ID {$product->get_id()} sin marca en '{$taxonomy}'.";
+            $this->last_brand_label = 'Sin marca asignada';
+            return 0;
+        }
+
+        // Se usa el primer término como marca principal
+        $name = trim((string) $terms[0]->name);
+        $brand_id = $this->ensure_brand_on_remote($terms[0], $log);
+        if ($brand_id > 0) {
+            $this->last_brand_label = "{$name} (#{$brand_id})";
+        } else {
+            $this->last_brand_label = "{$name} — no creada (sin imagen / no existe en nibiru)";
+        }
+
+        return $brand_id;
+    }
+
+    /**
+     * Garantiza que una marca exista en remoto (mapeo por nombre, GET /api/brands o POST /api/upload-brand).
+     * La API exige imagen para crear una marca nueva; si el término no tiene imagen, no se crea.
+     *
+     * @param WP_Term $term Término de marca de origen.
+     * @return int brand_id remoto, o 0.
+     */
+    private function ensure_brand_on_remote($term, &$log) {
+        $name = trim((string) $term->name);
+        if ($name === '') {
+            return 0;
+        }
+
+        $key = strtolower($name);
+        if (isset($this->brand_mapping[$key])) {
+            $remote_id = (int) $this->brand_mapping[$key];
+            $log[] = "Mapping marca existente: '{$name}' => BrandID {$remote_id}";
+            return $remote_id;
+        }
+
+        $remote_id = $this->find_remote_brand($name, $log);
+
+        if (!$remote_id) {
+            $image_url = $this->get_brand_image_url($term);
+            $remote_id = $this->create_remote_brand($name, $image_url, $log);
+        }
+
+        if ($remote_id) {
+            $this->brand_mapping[$key] = $remote_id;
+            update_option('wc_exporter_brand_mapping', $this->brand_mapping);
+        }
+
+        return $remote_id;
+    }
+
+    /**
+     * Busca una marca en remoto por nombre (case-insensitive). GET /api/brands devuelve array plano.
+     */
+    private function find_remote_brand($name, &$log) {
+        $response = $this->api->get_brands();
+
+        if (is_wp_error($response)) {
+            $log[] = "Error en GET marcas remotas: " . $response->get_error_message();
+            return 0;
+        }
+
+        if (is_array($response)) {
+            $needle = strtolower(trim($name));
+            foreach ($response as $remote_brand) {
+                if (isset($remote_brand['name']) && strtolower(trim($remote_brand['name'])) === $needle) {
+                    $remote_id = (int) $remote_brand['id'];
+                    $log[] = "Marca encontrada en remoto: '{$name}' => BrandID {$remote_id}";
+                    return $remote_id;
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * Crea una marca en remoto (POST /api/upload-brand). Requiere image_url para altas.
+     */
+    private function create_remote_brand($name, $image_url, &$log) {
+        if (empty($image_url)) {
+            $log[] = "No se pudo crear la marca '{$name}': la API exige imagen y el término no tiene una. Crea la marca manualmente en la tienda o asigna imagen al término.";
+            return 0;
+        }
+
+        $brand_data = array(
+            'name'      => $name,
+            'image_url' => $image_url,
+        );
+
+        $log[] = "Intentando crear marca: " . json_encode($brand_data);
+
+        $response = $this->api->create_brand($brand_data);
+
+        if (is_wp_error($response)) {
+            $log[] = "Error al crear marca '{$name}': " . $response->get_error_message();
+            return 0;
+        }
+
+        if (isset($response['success']) && $response['success'] && isset($response['brand_id'])) {
+            $remote_id = (int) $response['brand_id'];
+            $action = isset($response['action']) ? $response['action'] : 'created';
+            $log[] = "Marca '{$name}' {$action}, BrandID: {$remote_id}";
+            return $remote_id;
+        }
+
+        $msg = isset($response['error']) ? $response['error'] : (isset($response['message']) ? $response['message'] : 'Respuesta inesperada.');
+        $log[] = "Error al crear marca '{$name}': {$msg}";
+        return 0;
+    }
+
+    /**
+     * Obtiene la URL de la imagen/logo de un término de marca.
+     * Soporta meta de marcas nativas WooCommerce ('thumbnail_id') y Perfect Brands ('pwb_brand_image').
+     *
+     * @return string URL absoluta o '' si no hay imagen.
+     */
+    private function get_brand_image_url($term) {
+        $meta_keys = array('thumbnail_id', 'pwb_brand_image');
+        foreach ($meta_keys as $meta_key) {
+            $attachment_id = (int) get_term_meta($term->term_id, $meta_key, true);
+            if ($attachment_id > 0) {
+                $url = $this->get_absolute_image_url($attachment_id);
+                if ($url) {
+                    return $url;
+                }
+            }
+        }
+        return '';
+    }
+
     /**
      * Procesa las variantes de un producto variable
      */
