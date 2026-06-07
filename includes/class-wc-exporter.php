@@ -15,6 +15,7 @@ class WC_Exporter {
     private $brand_source = '';
     private $brand_attribute = '';
     private $last_brand_label = '';
+    private $api_base_url = '';
     
     /**
      * Evita registrar hooks duplicados si se instancia otra vez (p. ej. lote vía admin.php).
@@ -157,6 +158,7 @@ class WC_Exporter {
         
         $offset = isset($args['offset']) ? (int) $args['offset'] : 0;
         $api_url = rtrim($api_url, '/');
+        $this->api_base_url = $api_url;
         $force_stock = !empty($args['force_stock']);
         $force_categories = !empty($args['force_categories']);
         $force_brands = !empty($args['force_brands']);
@@ -642,7 +644,7 @@ class WC_Exporter {
         if ($brand_id > 0) {
             $this->last_brand_label = "{$name} (#{$brand_id})";
         } else {
-            $this->last_brand_label = "{$name} — no creada (sin imagen / no existe en nibiru)";
+            $this->last_brand_label = "{$name} — error al crear (ver log)";
         }
 
         return $brand_id;
@@ -713,7 +715,11 @@ class WC_Exporter {
      */
     private function create_remote_brand($name, $image_url, &$log) {
         if (empty($image_url)) {
-            $log[] = "No se pudo crear la marca '{$name}': la API exige imagen y el término no tiene una. Crea la marca manualmente en la tienda o asigna imagen al término.";
+            // La API exige imagen para crear. Si el término no tiene, usamos un placeholder 1px.
+            $image_url = $this->get_fallback_brand_image_url($log);
+        }
+        if (empty($image_url)) {
+            $log[] = "No se pudo crear la marca '{$name}': sin imagen del término y no se pudo generar el placeholder.";
             return 0;
         }
 
@@ -761,6 +767,20 @@ class WC_Exporter {
             }
         }
         return '';
+    }
+
+    /**
+     * URL del placeholder de imagen del propio sitio nibiru, para crear marcas sin imagen propia.
+     * Es la API URL configurada + /assets/img/no-image.jpg.
+     * La API de nibiru exige imagen para crear; este placeholder cumple el requisito.
+     *
+     * @return string URL o '' si no hay API URL.
+     */
+    private function get_fallback_brand_image_url(&$log) {
+        if (empty($this->api_base_url)) {
+            return '';
+        }
+        return $this->api_base_url . '/assets/img/no-image.jpg';
     }
 
     /**

@@ -253,9 +253,10 @@ class WC_Exporter_Admin {
                 </div>
 
                 <p class="description" style="margin:0;">
-                    Para crear una marca nueva en nibiru se necesita imagen. Las marcas nativas y Perfect Brands
-                    usan la imagen del término; etiquetas y atributos no tienen imagen, así que esas marcas deben
-                    existir previamente en la tienda o crearse a mano.
+                    Las marcas nativas y Perfect Brands usan la imagen del término. Etiquetas y atributos no
+                    tienen imagen: la marca se crea igual usando el placeholder del sitio
+                    (<code>/assets/img/no-image.jpg</code>), reemplazable después en nibiru. Si la marca ya
+                    existe en nibiru, solo se asigna por nombre.
                 </p>
 
                 <label for="force_brands">Forzar reexportar marcas:</label>
