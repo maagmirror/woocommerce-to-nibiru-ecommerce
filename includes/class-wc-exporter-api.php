@@ -178,4 +178,37 @@ class WC_Exporter_API {
         $body = json_decode(wp_remote_retrieve_body($response), true);
         return $body;
     }
+
+    /**
+     * Crea o actualiza un post de blog en el ecommerce remoto (POST /api/upload-post).
+     * Campos: title (obligatorio), content, summary, slug, keywords, lang_id,
+     * category_name (se busca/crea por nombre en el ecommerce), image_url (imagen
+     * destacada, se descarga del lado del ecommerce), external_id (ID del post en WP,
+     * idempotencia), external_source, created_at; apikey se añade aquí.
+     *
+     * @param array $post_data Datos del post
+     * @return array|WP_Error Respuesta de la API o error
+     */
+    public function create_post($post_data) {
+        $url = "{$this->api_url}/api/upload-post";
+        $data = array_merge(array('apikey' => $this->api_key), $post_data);
+
+        $response = wp_remote_post($url, array(
+            'timeout' => 30,
+            'body' => wp_json_encode($data),
+            'headers' => array('Content-Type' => 'application/json')
+        ));
+
+        if (is_wp_error($response)) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return $this->http_error($response, $code);
+        }
+
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        return $body;
+    }
 }
