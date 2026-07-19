@@ -171,6 +171,33 @@ class WC_Exporter_Posts {
     }
 
     /**
+     * Renderiza el contenido del post a HTML limpio. WordPress guarda el contenido con
+     * markup de bloques Gutenberg (comentarios `<!-- wp:... -->`) que NO deben viajar
+     * crudos al ecommerce. Se corre el pipeline core (do_blocks → texturize → autop →
+     * shortcodes) SIN aplicar `the_content` completo, para evitar que plugins de terceros
+     * inyecten "posts relacionados", anuncios, etc. Al final se limpian comentarios de
+     * bloque residuales por las dudas.
+     */
+    private function render_post_content($post) {
+        $content = (string) $post->post_content;
+        if (function_exists('do_blocks')) {
+            $content = do_blocks($content);
+        }
+        if (function_exists('wptexturize')) {
+            $content = wptexturize($content);
+        }
+        if (function_exists('wpautop')) {
+            $content = wpautop($content);
+        }
+        if (function_exists('do_shortcode')) {
+            $content = do_shortcode($content);
+        }
+        // Barrido defensivo de comentarios de bloque que hayan sobrevivido.
+        $content = preg_replace('/<!--\s*\/?wp:.*?-->/s', '', $content);
+        return trim((string) $content);
+    }
+
+    /**
      * Arma el payload para /api/upload-post desde un WP_Post.
      */
     private function build_post_payload($post, $lang_id) {
@@ -204,7 +231,7 @@ class WC_Exporter_Posts {
             'lang_id'         => (int) $lang_id,
             'title'           => (string) $post->post_title,
             'slug'            => (string) $post->post_name,
-            'content'         => (string) $post->post_content,
+            'content'         => $this->render_post_content($post),
             'summary'         => (string) $summary,
             'keywords'        => (string) $keywords,
             'category_name'   => (string) $category_name,
