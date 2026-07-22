@@ -380,9 +380,13 @@ class WC_Exporter {
             'seo_keywords' => implode(', ', wp_get_post_terms($product_id, 'product_tag', array('fields' => 'names'))),
         );
         
-        // Procesar categoría
-        $category_id = $this->process_category($product, $log);
-        $data['category_id'] = $category_id;
+        // Procesar categorías: se envían TODAS (category_ids tiene prioridad en la API;
+        // category_id queda como principal para compatibilidad).
+        $category_ids = $this->process_categories($product, $log);
+        $data['category_id'] = !empty($category_ids) ? $category_ids[0] : 0;
+        if (!empty($category_ids)) {
+            $data['category_ids'] = $category_ids;
+        }
 
         // Procesar marca (según la fuente elegida en el panel)
         $brand_id = $this->process_brand($product, $log);
@@ -533,16 +537,35 @@ class WC_Exporter {
     }
     
     /**
-     * Procesa la categoría del producto
+     * Procesa la categoría del producto (compat: devuelve solo la primera).
      */
     private function process_category($product, &$log) {
+        $ids = $this->process_categories($product, $log);
+        return !empty($ids) ? $ids[0] : 0;
+    }
+
+    /**
+     * Procesa TODAS las categorías del producto (padre + subcategorías) y garantiza
+     * cada una en remoto. Devuelve array de IDs remotos (vacío si no tiene categorías).
+     */
+    private function process_categories($product, &$log) {
         $cat_ids = $product->get_category_ids();
         if (empty($cat_ids)) {
             $log[] = "Producto ID {$product->get_id()} no tiene categorías asignadas.";
-            return 0;
+            return array();
         }
-        
-        return $this->ensure_wc_category_on_remote((int) $cat_ids[0], $log);
+
+        $remote_ids = array();
+        foreach ($cat_ids as $wc_cat_id) {
+            $remote_id = $this->ensure_wc_category_on_remote((int) $wc_cat_id, $log);
+            if ($remote_id > 0 && !in_array($remote_id, $remote_ids, true)) {
+                $remote_ids[] = $remote_id;
+            }
+        }
+        if (count($cat_ids) > 1) {
+            $log[] = "Producto ID {$product->get_id()}: " . count($cat_ids) . " categorías Woo -> " . count($remote_ids) . " remotas (" . implode(',', $remote_ids) . ").";
+        }
+        return $remote_ids;
     }
     
     /**
