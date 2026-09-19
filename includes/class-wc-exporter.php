@@ -592,7 +592,7 @@ class WC_Exporter {
         
         $log[] = "Procesando categoría: WooCatID {$wc_cat_id} - Name: {$term->name} - Slug: {$term->slug}";
         
-        $remote_cat_id = $this->find_remote_category($term->slug, $log);
+        $remote_cat_id = $this->find_remote_category($term->slug, $log, $term->name);
         
         if (!$remote_cat_id) {
             $remote_cat_id = $this->create_remote_category($term, $log);
@@ -607,9 +607,16 @@ class WC_Exporter {
     }
     
     /**
-     * Busca una categoría en el ecommerce remoto por slug
+     * Busca una categoría en el ecommerce remoto, por slug y (si el ecomm lo expone) por nombre.
+     *
+     * GET /api/categorias devuelve un ARRAY PLANO de categorías, no un sobre
+     * {success, categories}. Este método acepta las dos formas para no depender de la
+     * versión del ecomm remoto: el plugin se instala contra ecomms de cualquier versión.
+     *
+     * El campo `name` solo lo traen los ecomms nuevos (antes la respuesta traía slug pero
+     * ningún nombre); cuando no está, el match por nombre simplemente no se intenta.
      */
-    private function find_remote_category($slug, &$log) {
+    private function find_remote_category($slug, &$log, $name = '') {
         $response = $this->api->get_categories();
         
         if (is_wp_error($response)) {
@@ -617,13 +624,38 @@ class WC_Exporter {
             return 0;
         }
         
-        if (isset($response['success']) && $response['success'] && !empty($response['categories'])) {
-            foreach ($response['categories'] as $remote_cat) {
-                if (isset($remote_cat['slug']) && $remote_cat['slug'] == $slug) {
-                    $log[] = "Categoría encontrada en remoto por slug: {$slug} => RemoteCatID {$remote_cat['id']}";
-                    return (int) $remote_cat['id'];
-                }
+        $rows = $response;
+        if (is_array($response) && isset($response['categories']) && is_array($response['categories'])) {
+            $rows = $response['categories'];
+        }
+        if (!is_array($rows)) {
+            return 0;
+        }
+        
+        $slug_needle = strtolower(trim((string) $slug));
+        $name_needle = strtolower(trim((string) $name));
+        $by_name = 0;
+        
+        foreach ($rows as $remote_cat) {
+            if (!is_array($remote_cat) || empty($remote_cat['id'])) {
+                continue;
             }
+            if ($slug_needle !== '' && isset($remote_cat['slug'])
+                && strtolower(trim((string) $remote_cat['slug'])) === $slug_needle) {
+                $log[] = "Categoría encontrada en remoto por slug: {$slug} => RemoteCatID {$remote_cat['id']}";
+                return (int) $remote_cat['id'];
+            }
+            if (!$by_name && $name_needle !== '' && isset($remote_cat['name'])
+                && strtolower(trim((string) $remote_cat['name'])) === $name_needle) {
+                $by_name = (int) $remote_cat['id'];
+            }
+        }
+        
+        // El slug manda: el ecomm lo genera del nombre y puede diferir del de Woo
+        // (acentos, sufijos "-2"), así que el nombre queda como segundo intento.
+        if ($by_name) {
+            $log[] = "Categoría encontrada en remoto por nombre: {$name} => RemoteCatID {$by_name}";
+            return $by_name;
         }
         
         return 0;
